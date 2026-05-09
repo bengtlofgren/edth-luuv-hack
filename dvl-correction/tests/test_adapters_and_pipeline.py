@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from edth_luuv_hack import (
+from dvl_correction import (
     ImuSample,
     NavigationFusionPipeline,
     RawDvlMeasurement,

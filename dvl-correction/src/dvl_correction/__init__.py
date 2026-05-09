@@ -1,4 +1,4 @@
-"""Navigation fusion utilities for the EDTH LUUV hack project."""
+"""DVL/IMU navigation fusion layer."""
 
 from .adapters import iter_sensor_jsonl, load_imu_csv, load_raw_dvl_csv
 from .calibration import FrameCalibration, rotation_matrix_from_euler_rad

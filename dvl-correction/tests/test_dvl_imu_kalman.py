@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from edth_luuv_hack import CorrectedDvlMeasurement, DvlImuKalmanLayer, ImuSample, KalmanConfig
+from dvl_correction import CorrectedDvlMeasurement, DvlImuKalmanLayer, ImuSample, KalmanConfig
 
 
 class DvlImuKalmanLayerTest(unittest.TestCase):

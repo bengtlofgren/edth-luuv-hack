@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "edth-luuv-hack"
+name = "dvl-correction"
 version = "0.1.0"
 description = "DVL and IMU navigation fusion layer"
 readme = "README.md"
