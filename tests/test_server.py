@@ -15,6 +15,7 @@ from httpx import AsyncClient, ASGITransport
 from starlette.testclient import TestClient as StarletteTestClient
 
 import src.server
+from src.replay import SimrisReplay
 from src.server import app
 
 
@@ -1281,3 +1282,145 @@ class TestIntegration:
             resp = await ac.get("/api/recording/status")
             assert resp.status_code == 200
             assert resp.json()["recording"] is False
+
+
+# ===================================================================
+# 71-75.  Demo 6 — Real-data replay module unit tests
+# ===================================================================
+
+
+class TestReplay:
+    @pytest.mark.asyncio
+    async def test_replay_module_parses_data(self):
+        """Instantiate SimrisReplay, verify gps_events and imu_events are non-empty lists."""
+        replay = SimrisReplay("/home/tyhug/hackathon/simris_2min")
+        assert isinstance(replay.gps_events, list)
+        assert len(replay.gps_events) > 0
+        assert isinstance(replay.imu_events, list)
+        assert len(replay.imu_events) > 0
+
+    @pytest.mark.asyncio
+    async def test_replay_gps_format(self):
+        """Verify parsed GPS events have lat, lon, timestamp fields in correct ranges."""
+        replay = SimrisReplay("/home/tyhug/hackathon/simris_2min")
+        event = replay.gps_events[0]
+        assert "lat" in event
+        assert "lon" in event
+        assert "timestamp" in event
+        assert 55.5 <= event["lat"] <= 55.6
+        assert 14.3 <= event["lon"] <= 14.4
+        assert isinstance(event["timestamp"], (int, float))
+
+    @pytest.mark.asyncio
+    async def test_replay_imu_format(self):
+        """Verify parsed IMU events have acc_x, acc_y, acc_z, gyro_x, gyro_y,
+        gyro_z, mag_x, mag_y, mag_z fields."""
+        replay = SimrisReplay("/home/tyhug/hackathon/simris_2min")
+        event = replay.imu_events[0]
+        for field in ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
+                      "mag_x", "mag_y", "mag_z"):
+            assert field in event, f"Missing IMU field: {field}"
+            assert isinstance(event[field], float)
+
+    @pytest.mark.asyncio
+    async def test_replay_start_stop(self, monkeypatch):
+        """Start replay via POST /api/replay/start, verify status shows
+        running=true, stop it, verify running=false."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Start
+            resp = await ac.post("/api/replay/start")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "running"
+
+            # Status shows running
+            resp = await ac.get("/api/replay/status")
+            assert resp.status_code == 200
+            assert resp.json()["running"] is True
+
+            # Stop
+            resp = await ac.post("/api/replay/stop")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "stopped"
+
+            # Status shows stopped
+            resp = await ac.get("/api/replay/status")
+            assert resp.status_code == 200
+            assert resp.json()["running"] is False
+
+    @pytest.mark.asyncio
+    async def test_replay_feeds_state(self, monkeypatch):
+        """Start replay at high speed, wait briefly, GET /api/state —
+        verify lat/lon are populated from real data (not default 55.5601)."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Start replay at 100x speed
+            resp = await ac.post("/api/replay/start", params={"speed": 100})
+            assert resp.status_code == 200
+
+            # Let replay feed some GPS events
+            await asyncio.sleep(0.5)
+
+            # State should have real Simris GPS data
+            resp = await ac.get("/api/state")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["lat"] is not None
+            assert data["lon"] is not None
+            # Real data is around 55.56, not the default BASE_LAT 55.5601
+            assert data["lat"] != 55.5601
+
+
+# ===================================================================
+# 76-77.  Demo 6 — Real-data drift and GPS denial
+# ===================================================================
+
+
+class TestRealDataDrift:
+    @pytest.mark.asyncio
+    async def test_real_imu_drift_nonzero(self, monkeypatch):
+        """Start replay, let it run, GET /api/risk — verify imu drift_rate_dps
+        is non-zero (real IMU has actual gyro bias)."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Start replay at moderate speed to accumulate gyro samples
+            resp = await ac.post("/api/replay/start", params={"speed": 50})
+            assert resp.status_code == 200
+
+            # Let replay feed IMU events to build up gyro bias
+            await asyncio.sleep(1.0)
+
+            # Risk should show non-zero drift from real IMU data
+            resp = await ac.get("/api/risk")
+            assert resp.status_code == 200
+            imu = resp.json()["imu"]
+            assert imu["drift_rate_dps"] > 0, (
+                "Expected non-zero drift rate from real IMU gyro bias"
+            )
+
+    @pytest.mark.asyncio
+    async def test_gps_denial_with_real_data(self, monkeypatch):
+        """Start replay, enable GPS denial, GET /api/dead-reckon —
+        verify it returns DR position with real data."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Start replay to feed real GPS data into state
+            resp = await ac.post("/api/replay/start", params={"speed": 100})
+            assert resp.status_code == 200
+            await asyncio.sleep(0.3)
+
+            # Enable GPS denial — captures last GPS fix as DR origin
+            resp = await ac.get("/api/gps-deny/on")
+            assert resp.status_code == 200
+
+            # Dead-reckon should have position from replayed GPS
+            resp = await ac.get("/api/dead-reckon")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["dr_lat"] is not None
+            assert data["dr_lon"] is not None
+            assert data["position_source"] == "dead_reckon"
