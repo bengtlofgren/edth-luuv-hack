@@ -6,6 +6,7 @@ interface Props {
   connected: boolean;
   status: SimStatus;
   waypointCount: number;
+  plannerSync: "idle" | "syncing" | "linked" | "paused" | "error";
   confidence: ConfidenceLevel;
   onConfidenceChange: (c: ConfidenceLevel) => void;
   onPlay: () => void;
@@ -22,6 +23,7 @@ export function ControlPanel({
   connected,
   status,
   waypointCount,
+  plannerSync,
   confidence,
   onConfidenceChange,
   onPlay,
@@ -50,6 +52,21 @@ export function ControlPanel({
           {connected ? "ws://127.0.0.1:8080/ws" : "disconnected"}
         </div>
         <div style={{ fontSize: 12, color: "#7a90a8" }}>state: {status}</div>
+      </section>
+
+      <section>
+        <h2>Command Center</h2>
+        <div className={`sync-pill ${plannerSync}`}>
+          {plannerSync === "idle"
+            ? "route idle"
+            : plannerSync === "syncing"
+              ? "syncing route"
+              : plannerSync === "linked"
+                ? "route linked"
+                : plannerSync === "paused"
+                  ? "route paused"
+                  : "sync failed"}
+        </div>
       </section>
 
       <section>
