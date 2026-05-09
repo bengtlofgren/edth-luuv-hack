@@ -1,0 +1,23 @@
+[package]
+name = "imu-drift"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Mathematically rigorous, no_std, generic drift propagation and Allan variance estimation for IMU error models"
+rust-version = "1.75"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+sample = ["dep:rand_core"]
+std = []
+
+[dependencies]
+num-traits = { version = "=0.2.19", default-features = false, features = ["libm"] }
+rand_core = { version = "=0.6.4", default-features = false, optional = true }
+
+[dev-dependencies]
+rand_pcg = "=0.3.1"
+rand_core = { version = "=0.6.4", default-features = false }

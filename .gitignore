@@ -1,9 +1,75 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Rustfmt backup files
+*.rs.bk
+
+# Compiled object/library files (in case anyone builds outside cargo)
+*.o
+*.a
+*.so
+*.dylib
+*.rlib
+
+# Cargo.lock — committed for binaries, ignored for pure libraries.
+# The Rust team's current guidance (2023+) is to commit Cargo.lock for
+# applications and leave it for libraries to the maintainer's discretion.
+# This repo currently contains a library crate (`imu-drift`); flip this
+# line if you publish a binary or want fully reproducible CI builds.
+#Cargo.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.fuse_hidden*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.nvim.lua
+.helix/
+
+# Environment / secrets — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Coverage / profiling output
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml
+lcov.info
+
+# Documentation build output
+/book/
+target/doc/
+
+# Python (in case any tooling scripts land here later)
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 build/
 dist/
 *.egg-info/
+
+# Node (likewise)
+node_modules/
