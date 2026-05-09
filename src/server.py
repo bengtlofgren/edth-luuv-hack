@@ -494,6 +494,41 @@ def _dead_reckon_payload() -> dict[str, Any]:
     }
 
 
+def _navigation_uncertainty_payload(heading_deg: float | None = None) -> dict[str, Any]:
+    cov = np.asarray(state.kf_covariance, dtype=float)
+    if cov.shape != (2, 2) or not np.all(np.isfinite(cov)):
+        cov = np.eye(2)
+    cov = (cov + cov.T) * 0.5
+    values, vectors = np.linalg.eigh(cov)
+    order = np.argsort(values)[::-1]
+    values = values[order]
+    vectors = vectors[:, order]
+    confidence_scale = math.sqrt(5.991)
+    semi_major = confidence_scale * math.sqrt(max(0.0, float(values[0])))
+    semi_minor = confidence_scale * math.sqrt(max(0.0, float(values[1])))
+    semi_major = max(6.0, semi_major)
+    semi_minor = max(2.5, min(semi_major, semi_minor))
+    if abs(float(values[0]) - float(values[1])) < 1.0e-6 and heading_deg is not None:
+        orientation_deg = float(heading_deg)
+    else:
+        axis = vectors[:, 0]
+        orientation_deg = math.degrees(math.atan2(float(axis[1]), float(axis[0]))) % 360.0
+    ellipse = {
+        "semi_major_m": round(semi_major, 1),
+        "semi_minor_m": round(semi_minor, 1),
+        "orientation_deg": round(orientation_deg, 1),
+    }
+    return {
+        "uncertainty_m": ellipse["semi_major_m"],
+        "ellipse": ellipse,
+        "uncertainty_ellipse": {
+            "semi_major": ellipse["semi_major_m"],
+            "semi_minor": ellipse["semi_minor_m"],
+            "angle_deg": ellipse["orientation_deg"],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Replay runner
 # ---------------------------------------------------------------------------
@@ -647,6 +682,8 @@ async def post_gps(data: GpsData):
         )
     )
     _remember_kf_output(state.kf.output(timestamp_s, dvl_update_applied=dvl_update_applied))
+    uncertainty = _navigation_uncertainty_payload(heading_deg)
+    state.buffers["gps"][-1].update(uncertainty)
 
     if not state.gps_denied:
         await _broadcast({
@@ -655,6 +692,7 @@ async def post_gps(data: GpsData):
             "lon": data.lon,
             "speed_kn": speed_kn,
             "heading_deg": heading_deg,
+            **uncertainty,
             "timestamp": _last_ts("gps"),
         })
         state.track_buffer.append({
@@ -1265,21 +1303,25 @@ async def _simulator_loop() -> None:
             lon = BASE_LON + lon_off + 5e-5 * math.cos(0.08 * t)
 
         if not state.gps_denied:
-            _buffer_sensor("gps", {"lat": round(lat, 6), "lon": round(lon, 6), "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1), "heading_deg": round(heading, 1)})
-            await _broadcast({
-                "type": "gps",
+            gps_update = {
                 "lat": round(lat, 6),
                 "lon": round(lon, 6),
                 "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
                 "heading_deg": round(heading, 1),
+                **_navigation_uncertainty_payload(round(heading, 1)),
+            }
+            _buffer_sensor("gps", gps_update)
+            await _broadcast({
+                "type": "gps",
+                **gps_update,
                 "timestamp": _last_ts("gps"),
             })
             state.track_buffer.append({
-                "lat": round(lat, 6),
-                "lon": round(lon, 6),
+                "lat": gps_update["lat"],
+                "lon": gps_update["lon"],
                 "timestamp": _last_ts("gps"),
-                "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
-                "heading_deg": round(heading, 1),
+                "speed_kn": gps_update["speed_kn"],
+                "heading_deg": gps_update["heading_deg"],
             })
 
         # Dead reckoning during GPS denial

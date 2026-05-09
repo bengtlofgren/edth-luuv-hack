@@ -70,53 +70,6 @@ export function Canvas({
   const polyPoints = waypoints.flatMap((p) => w2c(p));
   const e = cov ? ellipseFromCov(cov, ellipseK) : null;
   const meanPx = mean ? w2c(mean) : null;
-  const activeSegment = (() => {
-    if (!mean || waypoints.length < 2) return null;
-    let best = waypoints[1];
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < waypoints.length - 1; i += 1) {
-      const a = waypoints[i];
-      const b = waypoints[i + 1];
-      const dx = b[0] - a[0];
-      const dy = b[1] - a[1];
-      const lenSq = dx * dx + dy * dy;
-      if (lenSq <= 1e-9) continue;
-      const t = Math.max(
-        0,
-        Math.min(1, ((mean[0] - a[0]) * dx + (mean[1] - a[1]) * dy) / lenSq),
-      );
-      const px = a[0] + t * dx;
-      const py = a[1] + t * dy;
-      const dist = (mean[0] - px) ** 2 + (mean[1] - py) ** 2;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = b;
-      }
-    }
-    return best;
-  })();
-  const shipPoints = (() => {
-    if (!mean || !meanPx) return [];
-    const target = activeSegment ?? [mean[0], mean[1] + 1];
-    const dx = target[0] - mean[0];
-    const dy = target[1] - mean[1];
-    const mag = Math.hypot(dx, dy) || 1;
-    const ux = dx / mag;
-    const uy = -dy / mag;
-    const px = -uy;
-    const py = ux;
-    const nose = 12;
-    const tail = 8;
-    const halfWidth = 7;
-    return [
-      meanPx[0] + ux * nose,
-      meanPx[1] + uy * nose,
-      meanPx[0] - ux * tail + px * halfWidth,
-      meanPx[1] - uy * tail + py * halfWidth,
-      meanPx[0] - ux * tail - px * halfWidth,
-      meanPx[1] - uy * tail - py * halfWidth,
-    ];
-  })();
 
   const handleStageClick = (evt: KonvaEventObject<MouseEvent>) => {
     if (!editable) return;
@@ -192,32 +145,18 @@ export function Canvas({
               radiusY={Math.max(1, e.semiMinor * scale)}
               rotation={(-e.rotationRad * 180) / Math.PI}
               stroke="#ffb300"
-              strokeWidth={2.5}
-              dash={[8, 5]}
-              fill="rgba(255, 179, 0, 0.18)"
-            />
-          )}
-          {meanPx && e && (
-            <KEllipse
-              x={meanPx[0]}
-              y={meanPx[1]}
-              radiusX={Math.max(1, e.semiMajor * 0.45 * scale)}
-              radiusY={Math.max(1, e.semiMinor * 0.45 * scale)}
-              rotation={(-e.rotationRad * 180) / Math.PI}
-              stroke="rgba(255, 179, 0, 0.75)"
-              strokeWidth={1.5}
-              fillEnabled={false}
+              strokeWidth={2}
+              fill="rgba(255, 179, 0, 0.12)"
             />
           )}
           {meanPx && (
-            <Line
-              points={shipPoints}
-              closed
+            <Circle
+              x={meanPx[0]}
+              y={meanPx[1]}
+              radius={6}
               fill="#ff5252"
               stroke="#ffffff"
               strokeWidth={1.5}
-              shadowColor="#ff5252"
-              shadowBlur={8}
             />
           )}
         </Layer>

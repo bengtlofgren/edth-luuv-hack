@@ -262,7 +262,7 @@ var v2={lat:null,lon:null,heading:null,speed:null,trackPoints:[]};
 var recording=false,recStartTime=null,recTimer=null,showingReplay=false,replayPoller=null;
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
-var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
+var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
 var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false;
 var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
@@ -335,6 +335,7 @@ function setGpsDeniedState(denied){
   btn.innerHTML=denied?'GPS: DENIED':'GPS: ACTIVE';
   timer.style.display=denied?'':'none';
   if(denied){
+    clearNavUncertainty();
     if(vesselMarker){vesselMarker.setIcon(createDeniedVesselIcon(state.heading));}
     drDeniedStart=Date.now();updateDRTimer();fetchDeadReckon();
     drTimer=setInterval(function(){fetchDeadReckon();updateDRTimer();},2000);
@@ -357,6 +358,21 @@ function stopDR(){
   if(uncertaintyEllipse){map.removeLayer(uncertaintyEllipse);uncertaintyEllipse=null;}
   if(drConnectionLine){map.removeLayer(drConnectionLine);drConnectionLine=null;}
   if(!gpsDenied){updateVesselMarker(state.lat,state.lon,state.heading);}
+}
+function clearNavUncertainty(){
+  if(navUncertaintyEllipse){map.removeLayer(navUncertaintyEllipse);navUncertaintyEllipse=null;}
+}
+function updateNavUncertainty(lat,lon,d){
+  if(gpsDenied||lat==null||lon==null){clearNavUncertainty();return;}
+  var ell=d&&d.ellipse?d.ellipse:null;
+  var legacy=d&&d.uncertainty_ellipse?d.uncertainty_ellipse:null;
+  var major=ell&&ell.semi_major_m!=null?ell.semi_major_m:(legacy?legacy.semi_major:null);
+  var minor=ell&&ell.semi_minor_m!=null?ell.semi_minor_m:(legacy?legacy.semi_minor:null);
+  var angle=ell&&ell.orientation_deg!=null?ell.orientation_deg:(legacy?legacy.angle_deg:(state.heading||0));
+  if(!(major>0&&minor>0)){clearNavUncertainty();return;}
+  var pts=ellipsePolygon(lat,lon,major,minor,angle,64);
+  if(!navUncertaintyEllipse){navUncertaintyEllipse=L.polygon(pts,{color:'#00d4aa',weight:1.8,dashArray:'7,5',fillColor:'rgba(0,212,170,0.13)',fillOpacity:1,opacity:0.75}).addTo(map);}
+  else{navUncertaintyEllipse.setLatLngs(pts);}
 }
 function fetchDeadReckon(){
   fetch('/api/dead-reckon').then(function(r){return r.json();}).then(function(d){
@@ -535,8 +551,8 @@ ws.onmessage=function(e){var data;try{data=JSON.parse(e.data);}catch(x){return;}
 state.msgTimestamps.push(Date.now());state.lastMsgTime=Date.now();updateDatarate();
 var isV2=data.vessel==='support';
 switch(data.type){
-case'history':var hd=data.data;if(hd){if(hd.gps&&hd.gps.length){var g=hd.gps[hd.gps.length-1];state.lat=g.lat;state.lon=g.lon;state.speed=g.speed_kn||0;state.heading=g.heading_deg!=null?g.heading_deg:null;updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);}if(hd.pressure&&hd.pressure.length){var p=hd.pressure[hd.pressure.length-1];if(p.depth_m!=null)updateDepth(p.depth_m);}if(hd.barometer&&hd.barometer.length){var b=hd.barometer[hd.barometer.length-1];if(b.pressure_hpa!=null)updateBarometer(b.pressure_hpa);}}break;
-case'gps':if(data.lat!=null&&data.lon!=null){if(isV2){v2.lat=data.lat;v2.lon=data.lon;v2.heading=data.heading_deg!=null?data.heading_deg:v2.heading;v2.speed=data.speed_kn!=null?data.speed_kn:v2.speed;updateVessel2Marker(v2.lat,v2.lon,v2.heading);appendV2TrackPoint(v2.lat,v2.lon);}else{state.lat=data.lat;state.lon=data.lon;state.heading=data.heading_deg!=null?data.heading_deg:state.heading;state.speed=data.speed_kn!=null?data.speed_kn:state.speed;updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);appendTrackPoint(state.lat,state.lon);drawCompass(state.heading);}updateFleetPanel();}break;
+case'history':var hd=data.data;if(hd){if(hd.gps&&hd.gps.length){var g=hd.gps[hd.gps.length-1];state.lat=g.lat;state.lon=g.lon;state.speed=g.speed_kn||0;state.heading=g.heading_deg!=null?g.heading_deg:null;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,g);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);}if(hd.pressure&&hd.pressure.length){var p=hd.pressure[hd.pressure.length-1];if(p.depth_m!=null)updateDepth(p.depth_m);}if(hd.barometer&&hd.barometer.length){var b=hd.barometer[hd.barometer.length-1];if(b.pressure_hpa!=null)updateBarometer(b.pressure_hpa);}}break;
+case'gps':if(data.lat!=null&&data.lon!=null){if(isV2){v2.lat=data.lat;v2.lon=data.lon;v2.heading=data.heading_deg!=null?data.heading_deg:v2.heading;v2.speed=data.speed_kn!=null?data.speed_kn:v2.speed;updateVessel2Marker(v2.lat,v2.lon,v2.heading);appendV2TrackPoint(v2.lat,v2.lon);}else{state.lat=data.lat;state.lon=data.lon;state.heading=data.heading_deg!=null?data.heading_deg:state.heading;state.speed=data.speed_kn!=null?data.speed_kn:state.speed;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,data);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);appendTrackPoint(state.lat,state.lon);drawCompass(state.heading);}updateFleetPanel();}break;
 case'dead_reckon':updateDRVisualization(data);break;
 case'pressure':if(data.depth_m!=null)updateDepth(data.depth_m);break;
 case'barometer':if(data.pressure_hpa!=null)updateBarometer(data.pressure_hpa);break;
