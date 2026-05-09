@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dvl-correction"
+name = "dvl_correction"
 version = "0.1.0"
 description = "DVL and IMU navigation fusion layer"
 readme = "README.md"
@@ -13,5 +13,8 @@ dependencies = ["numpy>=1.24"]
 [project.scripts]
 edth-luuv-fuse = "dvl_correction.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = ["dvl_correction"]
+
+[tool.setuptools.package-dir]
+dvl_correction = "src"

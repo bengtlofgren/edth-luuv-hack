@@ -1,4 +1,4 @@
-# dvl-correction
+# dvl_correction
 
 A navigation fusion layer for corrected DVL measurements and IMU data.
 
