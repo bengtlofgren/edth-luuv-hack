@@ -4,11 +4,12 @@ Monorepo for navigation fusion experiments on a corrected DVL + IMU stack.
 
 ## Packages
 
-- [`dvl-correction/`](dvl-correction/) — DVL/IMU error-state Kalman fusion
-  layer with raw-DVL correction, frame calibration, and a streaming pipeline.
+- [`dvl-correction/`](dvl-correction/) - DVL/IMU error-state Kalman fusion
+  layer with raw-DVL correction, frame calibration, optional DVL velocity
+  dead-reckoning, runtime diagnostics, a CLI runner, and a streaming pipeline.
   See [`dvl-correction/README.md`](dvl-correction/README.md) for usage.
 
-More packages (e.g. `imu-drift`) will land in follow-up branches.
+More packages, such as `imu-drift`, can land in follow-up branches.
 
 ## Working on a package
 

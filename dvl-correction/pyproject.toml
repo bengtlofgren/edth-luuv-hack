@@ -10,5 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
+[project.scripts]
+edth-luuv-fuse = "dvl_correction.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

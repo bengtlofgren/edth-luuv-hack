@@ -110,7 +110,8 @@ class AdaptersAndPipelineTest(unittest.TestCase):
                 '"initial_state":{"position_m":[1,2,3]},'
                 '"kalman":{"gravity_nav_m_s2":[0,0,0]},'
                 '"dvl_quality":{"allowed_modes":["bottom"],"max_velocity_m_s":10.0},'
-                '"synchronizer":{"max_delay_s":0.0}'
+                '"synchronizer":{"max_delay_s":0.0},'
+                '"dvl_track":{"enabled":true,"initial_position_nav_m":[1,2,3]}'
                 "}",
                 encoding="utf-8",
             )
@@ -118,6 +119,7 @@ class AdaptersAndPipelineTest(unittest.TestCase):
             pipeline = build_navigation_pipeline_from_json(path)
 
         self.assertEqual(pipeline.config.max_delay_s, 0.0)
+        self.assertIsNotNone(pipeline.dvl_track)
         np.testing.assert_allclose(pipeline.kalman.state.position_m, np.array([1.0, 2.0, 3.0]))
 
 

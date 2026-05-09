@@ -8,6 +8,7 @@ from .config import (
     build_navigation_pipeline_from_json,
     load_navigation_config,
 )
+from .dead_reckoning import DvlDeadReckoningTrack, DvlTrackConfig, DvlTrackState
 from .dvl_correction import DvlCorrectionLayer, DvlQualityConfig, RawDvlMeasurement
 from .dvl_imu_kalman import (
     CorrectedDvlMeasurement,
@@ -17,13 +18,16 @@ from .dvl_imu_kalman import (
     NavigationOutput,
     NavigationState,
 )
-from .synchronization import NavigationFusionPipeline, SynchronizerConfig
+from .synchronization import NavigationFusionPipeline, PipelineDiagnostics, SynchronizerConfig
 
 __all__ = [
     "CorrectedDvlMeasurement",
     "DvlCorrectionLayer",
+    "DvlDeadReckoningTrack",
     "DvlImuKalmanLayer",
     "DvlQualityConfig",
+    "DvlTrackConfig",
+    "DvlTrackState",
     "FrameCalibration",
     "ImuSample",
     "InitialNavigationConfig",
@@ -31,6 +35,7 @@ __all__ = [
     "NavigationFusionPipeline",
     "NavigationOutput",
     "NavigationState",
+    "PipelineDiagnostics",
     "RawDvlMeasurement",
     "SynchronizerConfig",
     "build_navigation_pipeline",

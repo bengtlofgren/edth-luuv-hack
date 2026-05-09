@@ -20,6 +20,10 @@ filter for real logs:
 - Buffered timestamp ordering for high-rate IMU and lower-rate DVL streams.
 - JSON configuration for initial state, covariance, noise, calibration, and
   synchronization settings.
+- Optional DVL velocity dead-reckoning when the DVL does not directly provide a
+  corrected position track.
+- A CLI runner that writes navigation estimates and diagnostics from CSV/JSONL
+  logs.
 
 The IMU path predicts position by integrating acceleration and attitude over
 time. The DVL input is expected to be corrected before entering this layer, for
@@ -107,6 +111,17 @@ Run the tests with:
 python3 -m unittest discover -s tests
 ```
 
+Run a mixed JSONL log:
+
+```sh
+edth-luuv-fuse \
+  --jsonl sensor_log.jsonl \
+  --config navigation_config.json \
+  --enable-dvl-track \
+  --output-csv navigation.csv \
+  --diagnostics-json diagnostics.json
+```
+
 Example config file shape:
 
 ```json
@@ -134,6 +149,12 @@ Example config file shape:
   },
   "synchronizer": {
     "max_delay_s": 0.25
+  },
+  "dvl_track": {
+    "enabled": true,
+    "initial_position_nav_m": [0.0, 0.0, 0.0],
+    "initial_position_covariance_nav": 1.0,
+    "velocity_process_variance": 0.01
   }
 }
 ```

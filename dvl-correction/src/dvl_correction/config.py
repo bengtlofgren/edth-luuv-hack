@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .calibration import FrameCalibration
+from .dead_reckoning import DvlDeadReckoningTrack, DvlTrackConfig
 from .dvl_correction import DvlCorrectionLayer, DvlQualityConfig
 from .dvl_imu_kalman import DvlImuKalmanLayer, KalmanConfig, NavigationState
 from .synchronization import NavigationFusionPipeline, SynchronizerConfig
@@ -60,6 +61,7 @@ def build_navigation_pipeline(config: Mapping[str, Any]) -> NavigationFusionPipe
     calibration = _frame_calibration(config.get("calibration", {}))
     quality = _quality_config(config.get("dvl_quality", {}))
     synchronizer_config = _synchronizer_config(config.get("synchronizer", {}))
+    dvl_track = _dvl_track(config.get("dvl_track", {}))
 
     kalman = DvlImuKalmanLayer(
         initial_state=initial.state(),
@@ -69,6 +71,7 @@ def build_navigation_pipeline(config: Mapping[str, Any]) -> NavigationFusionPipe
     return NavigationFusionPipeline(
         kalman=kalman,
         dvl_correction=DvlCorrectionLayer(calibration=calibration, quality=quality),
+        dvl_track=dvl_track,
         config=synchronizer_config,
     )
 
@@ -118,6 +121,15 @@ def _synchronizer_config(value: Any) -> SynchronizerConfig:
     mapping = _mapping(value, "synchronizer")
     allowed = SynchronizerConfig.__dataclass_fields__
     return SynchronizerConfig(**{key: mapping[key] for key in mapping if key in allowed})
+
+
+def _dvl_track(value: Any) -> DvlDeadReckoningTrack | None:
+    mapping = _mapping(value, "dvl_track")
+    if not mapping.get("enabled", False):
+        return None
+    allowed = DvlTrackConfig.__dataclass_fields__
+    track_config = DvlTrackConfig(**{key: mapping[key] for key in mapping if key in allowed})
+    return DvlDeadReckoningTrack(track_config)
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:

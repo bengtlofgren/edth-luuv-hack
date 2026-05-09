@@ -9,6 +9,7 @@ from itertools import count
 
 import numpy as np
 
+from .dead_reckoning import DvlDeadReckoningTrack
 from .dvl_correction import DvlCorrectionLayer, RawDvlMeasurement
 from .dvl_imu_kalman import CorrectedDvlMeasurement, DvlImuKalmanLayer, ImuSample, NavigationOutput
 
@@ -18,6 +19,20 @@ class SynchronizerConfig:
     """Settings for ordering asynchronous sensor events."""
 
     max_delay_s: float = 0.25
+
+
+@dataclass
+class PipelineDiagnostics:
+    """Runtime counters for sensor fusion pipeline health."""
+
+    imu_samples: int = 0
+    raw_dvl_measurements: int = 0
+    corrected_dvl_measurements: int = 0
+    dvl_quality_rejections: int = 0
+    dvl_gate_rejections: int = 0
+    dvl_updates_applied: int = 0
+    dvl_track_updates: int = 0
+    outputs: int = 0
 
 
 class NavigationFusionPipeline:
@@ -32,11 +47,14 @@ class NavigationFusionPipeline:
         self,
         kalman: DvlImuKalmanLayer | None = None,
         dvl_correction: DvlCorrectionLayer | None = None,
+        dvl_track: DvlDeadReckoningTrack | None = None,
         config: SynchronizerConfig | None = None,
     ) -> None:
         self.kalman = kalman or DvlImuKalmanLayer()
         self.dvl_correction = dvl_correction or DvlCorrectionLayer()
+        self.dvl_track = dvl_track
         self.config = config or SynchronizerConfig()
+        self.diagnostics = PipelineDiagnostics()
         self._events: list[tuple[float, int, str, object]] = []
         self._event_counter = count()
         self._imu_samples: list[ImuSample] = []
@@ -48,18 +66,21 @@ class NavigationFusionPipeline:
 
         self._remember_imu(sample)
         self._push_event(sample.timestamp_s, "imu", sample)
+        self.diagnostics.imu_samples += 1
         return self.process_ready(self._ready_watermark(sample.timestamp_s))
 
     def add_raw_dvl_measurement(self, measurement: RawDvlMeasurement) -> list[NavigationOutput]:
         """Add a raw DVL sample and process events older than the delay window."""
 
         self._push_event(measurement.timestamp_s, "raw_dvl", measurement)
+        self.diagnostics.raw_dvl_measurements += 1
         return self.process_ready(self._ready_watermark(measurement.timestamp_s))
 
     def add_corrected_dvl_measurement(self, measurement: CorrectedDvlMeasurement) -> list[NavigationOutput]:
         """Add a corrected DVL sample and process events older than the delay window."""
 
         self._push_event(measurement.timestamp_s, "corrected_dvl", measurement)
+        self.diagnostics.corrected_dvl_measurements += 1
         return self.process_ready(self._ready_watermark(measurement.timestamp_s))
 
     def process_ready(self, watermark_s: float) -> list[NavigationOutput]:
@@ -70,6 +91,7 @@ class NavigationFusionPipeline:
             _, _, event_type, payload = heapq.heappop(self._events)
             output = self._process_event(event_type, payload)
             if output is not None:
+                self.diagnostics.outputs += 1
                 outputs.append(output)
         return outputs
 
@@ -99,22 +121,60 @@ class NavigationFusionPipeline:
 
     def _process_event(self, event_type: str, payload: object) -> NavigationOutput | None:
         if event_type == "imu":
-            return self.kalman.process(payload)  # type: ignore[arg-type]
+            if not isinstance(payload, ImuSample):
+                raise TypeError("imu event payload must be ImuSample")
+            return self.kalman.process(payload)
         if event_type == "corrected_dvl":
-            measurement = payload  # type: ignore[assignment]
+            if not isinstance(payload, CorrectedDvlMeasurement):
+                raise TypeError("corrected_dvl event payload must be CorrectedDvlMeasurement")
+            measurement = payload
             self._propagate_filter_to(measurement.timestamp_s)
+            measurement = self._add_dvl_track_position(measurement)
             update_applied = self.kalman.update_corrected_dvl(measurement)
+            self._record_dvl_update(update_applied)
             return self.kalman.output(measurement.timestamp_s, dvl_update_applied=update_applied)
         if event_type == "raw_dvl":
-            raw = payload  # type: ignore[assignment]
+            if not isinstance(payload, RawDvlMeasurement):
+                raise TypeError("raw_dvl event payload must be RawDvlMeasurement")
+            raw = payload
             angular_velocity = self._interpolate_imu(raw.timestamp_s).angular_velocity_rad_s
             corrected = self.dvl_correction.correct(raw, angular_velocity_body_rad_s=angular_velocity)
             if corrected is None:
+                self.diagnostics.dvl_quality_rejections += 1
                 return None
             self._propagate_filter_to(corrected.timestamp_s)
+            corrected = self._add_dvl_track_position(corrected)
             update_applied = self.kalman.update_corrected_dvl(corrected)
+            self._record_dvl_update(update_applied)
             return self.kalman.output(corrected.timestamp_s, dvl_update_applied=update_applied)
         raise ValueError(f"unknown event type: {event_type}")
+
+    def _record_dvl_update(self, update_applied: bool) -> None:
+        if update_applied:
+            self.diagnostics.dvl_updates_applied += 1
+        else:
+            self.diagnostics.dvl_gate_rejections += 1
+
+    def _add_dvl_track_position(self, measurement: CorrectedDvlMeasurement) -> CorrectedDvlMeasurement:
+        if self.dvl_track is None:
+            return measurement
+        if measurement.position_nav_m is not None or measurement.velocity_body_m_s is None:
+            return measurement
+
+        track_state = self.dvl_track.update(
+            timestamp_s=measurement.timestamp_s,
+            velocity_body_m_s=measurement.velocity_body_m_s,
+            attitude_quat_wxyz=self.kalman.state.attitude_quat_wxyz,
+            velocity_covariance_body=measurement.covariance_body,
+        )
+        self.diagnostics.dvl_track_updates += 1
+        return CorrectedDvlMeasurement(
+            timestamp_s=measurement.timestamp_s,
+            velocity_body_m_s=measurement.velocity_body_m_s,
+            covariance_body=measurement.covariance_body,
+            position_nav_m=track_state.position_nav_m,
+            position_covariance_nav=track_state.covariance_nav,
+        )
 
     def _propagate_filter_to(self, timestamp_s: float) -> None:
         timestamp_s = float(timestamp_s)
