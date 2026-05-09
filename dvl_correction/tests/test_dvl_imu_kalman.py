@@ -109,7 +109,7 @@ class DvlImuKalmanLayerTest(unittest.TestCase):
 
         self.assertEqual(output.gyro_bias_rad_s.shape, (3,))
         self.assertEqual(output.accel_bias_m_s2.shape, (3,))
-        self.assertEqual(output.covariance.shape, (15, 15))
+        self.assertEqual(output.covariance.shape, (16, 16))
 
     def test_rejects_bad_dvl_covariance_shape(self) -> None:
         layer = DvlImuKalmanLayer()

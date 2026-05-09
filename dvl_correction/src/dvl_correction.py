@@ -41,7 +41,7 @@ class DvlQualityConfig:
     min_altitude_m: float | None = 0.05
     max_altitude_m: float | None = 200.0
     max_velocity_m_s: float | None = 5.0
-    velocity_variance_floor: float = 0.0025
+    velocity_variance_floor: float = 0.04
     position_variance_floor: float = 0.01
 
 
