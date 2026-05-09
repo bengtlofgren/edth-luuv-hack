@@ -298,6 +298,18 @@ def _planner_xy_at_progress(progress_m: float) -> tuple[float, float, float]:
     return p0[0] + alpha * dx, p0[1] + alpha * dy, heading
 
 
+def _advance_planner_route(step_m: float) -> tuple[float, float, float]:
+    """Advance the active planner route by a metric step and return position."""
+    if state.planner_enabled and not state.planner_paused and not state.planner_done:
+        state.planner_progress_m = min(
+            state.planner_total_length_m,
+            state.planner_progress_m + max(0.0, step_m),
+        )
+        if state.planner_progress_m >= state.planner_total_length_m:
+            state.planner_done = True
+    return _planner_xy_at_progress(state.planner_progress_m)
+
+
 def _planner_geo_route() -> list[dict[str, float]]:
     return [
         {"x_m": x, "y_m": y, "lat": _planner_m_to_latlon(x, y)[0], "lon": _planner_m_to_latlon(x, y)[1]}
@@ -1064,14 +1076,7 @@ async def _simulator_loop() -> None:
 
         # ---- GPS: embedded planner route, or fallback slow survey pattern ----
         if state.planner_enabled:
-            if not state.planner_paused and not state.planner_done:
-                state.planner_progress_m = min(
-                    state.planner_total_length_m,
-                    state.planner_progress_m + step_m,
-                )
-                if state.planner_progress_m >= state.planner_total_length_m:
-                    state.planner_done = True
-            x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
+            x_m, y_m, heading = _advance_planner_route(step_m)
             lat, lon = _planner_m_to_latlon(x_m, y_m)
         else:
             if phase == 0:       # east

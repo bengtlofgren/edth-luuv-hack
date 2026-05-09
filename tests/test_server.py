@@ -6,6 +6,7 @@ Run with:
 
 import asyncio
 import importlib
+import math
 import queue
 import threading
 from contextlib import ExitStack
@@ -515,6 +516,16 @@ class TestEmbeddedPlanner:
             assert data["status"] == "planner_route_active"
             assert data["total_length_m"] == 20.0
             assert len(data["waypoints"]) == 3
+            assert data["waypoints"][0]["lat"] == pytest.approx(src.server.BASE_LAT)
+            assert data["waypoints"][0]["lon"] == pytest.approx(src.server.BASE_LON)
+            assert data["waypoints"][1]["lat"] == pytest.approx(src.server.BASE_LAT)
+            assert data["waypoints"][1]["lon"] - data["waypoints"][0]["lon"] == pytest.approx(
+                10.0 / (111320.0 * math.cos(math.radians(src.server.BASE_LAT)))
+            )
+            assert data["waypoints"][2]["lat"] - data["waypoints"][1]["lat"] == pytest.approx(
+                10.0 / 111320.0
+            )
+            assert data["waypoints"][2]["lon"] == pytest.approx(data["waypoints"][1]["lon"])
 
             resp = await ac.get("/api/planner/status")
             assert resp.status_code == 200
@@ -540,6 +551,43 @@ class TestEmbeddedPlanner:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.post("/api/planner/path", json={"waypoints": [[1, 1], [1, 1]]})
             assert resp.status_code == 400
+
+    def test_planner_advances_exact_metric_distance(self, monkeypatch):
+        _fresh_app(monkeypatch)
+        src.server._set_planner_path([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)])
+
+        x_m, y_m, heading = src.server._advance_planner_route(2.5)
+        assert src.server.state.planner_progress_m == pytest.approx(2.5)
+        assert x_m == pytest.approx(2.5)
+        assert y_m == pytest.approx(0.0)
+        assert heading == pytest.approx(90.0)
+
+        x_m, y_m, heading = src.server._advance_planner_route(10.5)
+        assert src.server.state.planner_progress_m == pytest.approx(13.0)
+        assert x_m == pytest.approx(10.0)
+        assert y_m == pytest.approx(3.0)
+        assert heading == pytest.approx(0.0)
+
+        src.server.state.planner_paused = True
+        x_m, y_m, heading = src.server._advance_planner_route(4.0)
+        assert src.server.state.planner_progress_m == pytest.approx(13.0)
+        assert x_m == pytest.approx(10.0)
+        assert y_m == pytest.approx(3.0)
+        assert heading == pytest.approx(0.0)
+
+        src.server.state.planner_paused = False
+        x_m, y_m, heading = src.server._advance_planner_route(100.0)
+        assert src.server.state.planner_progress_m == pytest.approx(20.0)
+        assert src.server.state.planner_done is True
+        assert x_m == pytest.approx(10.0)
+        assert y_m == pytest.approx(10.0)
+        assert heading == pytest.approx(0.0)
+
+        x_m, y_m, heading = src.server._advance_planner_route(5.0)
+        assert src.server.state.planner_progress_m == pytest.approx(20.0)
+        assert x_m == pytest.approx(10.0)
+        assert y_m == pytest.approx(10.0)
+        assert heading == pytest.approx(0.0)
 
 
 # ===================================================================
