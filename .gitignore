@@ -73,3 +73,20 @@ dist/
 
 # Node (likewise)
 node_modules/
+
+
+
+# Environments
+venv/
+.env
+
+# Testing & Coverage
+.coverage
+htmlcov/
+
+# Tool specific
+.claude-flow/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
