@@ -129,6 +129,12 @@ class DvlImuKalmanLayer:
             dvl_update_applied = self.update_corrected_dvl(corrected_dvl)
         return self.output(imu_sample.timestamp_s, dvl_update_applied=dvl_update_applied)
 
+    @property
+    def last_timestamp_s(self) -> float | None:
+        """Timestamp of the last IMU propagation sample processed by the filter."""
+
+        return self._last_timestamp_s
+
     def propagate_imu(self, imu_sample: ImuSample) -> None:
         """Advance the nominal state and covariance using one IMU sample."""
 
