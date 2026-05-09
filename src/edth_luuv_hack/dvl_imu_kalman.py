@@ -5,8 +5,9 @@ biases. The covariance is maintained for a 15 element error state ordered as:
 
     position, velocity, attitude error, gyro bias, accelerometer bias
 
-DVL velocity measurements are assumed to be corrected before they are passed to
-this layer and expressed in the IMU/body frame.
+DVL measurements are assumed to be corrected before they are passed to this
+layer. Velocity is expressed in the IMU/body frame. Position is expressed in the
+navigation frame and can come from an integrated/corrected DVL track estimate.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import numpy as np
 
 
 ArrayLike3 = Sequence[float] | np.ndarray
+CovarianceLike3 = float | Sequence[Sequence[float]] | np.ndarray
 
 
 @dataclass(frozen=True)
@@ -31,11 +33,17 @@ class ImuSample:
 
 @dataclass(frozen=True)
 class CorrectedDvlMeasurement:
-    """Corrected DVL velocity measurement in the IMU/body frame."""
+    """Corrected DVL measurements used to update the IMU-predicted state."""
 
     timestamp_s: float
-    velocity_body_m_s: ArrayLike3
-    covariance_body: float | Sequence[Sequence[float]] | np.ndarray | None = None
+    velocity_body_m_s: ArrayLike3 | None = None
+    covariance_body: CovarianceLike3 | None = None
+    position_nav_m: ArrayLike3 | None = None
+    position_covariance_nav: CovarianceLike3 | None = None
+
+    def __post_init__(self) -> None:
+        if self.velocity_body_m_s is None and self.position_nav_m is None:
+            raise ValueError("CorrectedDvlMeasurement needs velocity_body_m_s, position_nav_m, or both")
 
 
 @dataclass
@@ -82,6 +90,7 @@ class KalmanConfig:
     gyro_bias_walk_std_rad_s2: float = 1.0e-5
     accel_bias_walk_std_m_s3: float = 1.0e-4
     default_dvl_velocity_std_m_s: float = 0.05
+    default_dvl_position_std_m: float = 0.25
     initial_position_std_m: float = 1.0
     initial_velocity_std_m_s: float = 1.0
     initial_attitude_std_rad: float = 0.1
@@ -91,7 +100,7 @@ class KalmanConfig:
 
 
 class DvlImuKalmanLayer:
-    """Fusion layer for IMU propagation and corrected-DVL velocity updates."""
+    """Fusion layer for IMU propagation and corrected-DVL updates."""
 
     def __init__(
         self,
@@ -154,14 +163,27 @@ class DvlImuKalmanLayer:
         self._propagate_covariance(dt, rotation_body_to_nav, specific_force_body)
 
     def update_corrected_dvl(self, measurement: CorrectedDvlMeasurement) -> bool:
-        """Apply a corrected DVL body-frame velocity update.
+        """Apply corrected DVL velocity and/or position updates.
 
-        Returns True when the measurement was fused, or False when it was
-        rejected by the optional Mahalanobis gate.
+        Returns True when at least one measurement was fused, or False when all
+        provided measurements were rejected by the optional Mahalanobis gate.
         """
 
+        update_applied = False
+        if measurement.velocity_body_m_s is not None:
+            update_applied = self.update_corrected_dvl_velocity(measurement) or update_applied
+        if measurement.position_nav_m is not None:
+            update_applied = self.update_corrected_dvl_position(measurement) or update_applied
+        return update_applied
+
+    def update_corrected_dvl_velocity(self, measurement: CorrectedDvlMeasurement) -> bool:
+        """Apply a corrected DVL body-frame velocity update."""
+
+        if measurement.velocity_body_m_s is None:
+            raise ValueError("velocity_body_m_s is required for a DVL velocity update")
+
         velocity_body = _as_vec3(measurement.velocity_body_m_s, "velocity_body_m_s")
-        measurement_covariance = _measurement_covariance(measurement, self.config)
+        measurement_covariance = _velocity_measurement_covariance(measurement, self.config)
 
         rotation_body_to_nav = _quat_to_rotation_matrix(self.state.attitude_quat_wxyz)
         predicted_velocity_body = rotation_body_to_nav.T @ self.state.velocity_m_s
@@ -171,6 +193,29 @@ class DvlImuKalmanLayer:
         h_matrix[:, 3:6] = rotation_body_to_nav.T
         h_matrix[:, 6:9] = rotation_body_to_nav.T @ _skew(self.state.velocity_m_s)
 
+        return self._apply_measurement_update(residual, h_matrix, measurement_covariance)
+
+    def update_corrected_dvl_position(self, measurement: CorrectedDvlMeasurement) -> bool:
+        """Apply a corrected DVL navigation-frame position update."""
+
+        if measurement.position_nav_m is None:
+            raise ValueError("position_nav_m is required for a DVL position update")
+
+        position_nav = _as_vec3(measurement.position_nav_m, "position_nav_m")
+        measurement_covariance = _position_measurement_covariance(measurement, self.config)
+        residual = position_nav - self.state.position_m
+
+        h_matrix = np.zeros((3, 15))
+        h_matrix[:, 0:3] = np.eye(3)
+
+        return self._apply_measurement_update(residual, h_matrix, measurement_covariance)
+
+    def _apply_measurement_update(
+        self,
+        residual: np.ndarray,
+        h_matrix: np.ndarray,
+        measurement_covariance: np.ndarray,
+    ) -> bool:
         innovation_covariance = h_matrix @ self.covariance @ h_matrix.T + measurement_covariance
         if self.config.mahalanobis_gate is not None:
             distance = float(residual.T @ np.linalg.solve(innovation_covariance, residual))
@@ -278,12 +323,21 @@ def _initial_covariance(config: KalmanConfig) -> np.ndarray:
     return np.diag(variances)
 
 
-def _measurement_covariance(measurement: CorrectedDvlMeasurement, config: KalmanConfig) -> np.ndarray:
-    if measurement.covariance_body is None:
-        variance = config.default_dvl_velocity_std_m_s * config.default_dvl_velocity_std_m_s
-        return np.eye(3) * variance
+def _velocity_measurement_covariance(measurement: CorrectedDvlMeasurement, config: KalmanConfig) -> np.ndarray:
+    variance = config.default_dvl_velocity_std_m_s * config.default_dvl_velocity_std_m_s
+    return _measurement_covariance(measurement.covariance_body, variance)
 
-    covariance = np.asarray(measurement.covariance_body, dtype=float)
+
+def _position_measurement_covariance(measurement: CorrectedDvlMeasurement, config: KalmanConfig) -> np.ndarray:
+    variance = config.default_dvl_position_std_m * config.default_dvl_position_std_m
+    return _measurement_covariance(measurement.position_covariance_nav, variance)
+
+
+def _measurement_covariance(value: CovarianceLike3 | None, default_variance: float) -> np.ndarray:
+    if value is None:
+        return np.eye(3) * default_variance
+
+    covariance = np.asarray(value, dtype=float)
     if covariance.ndim == 0:
         return np.eye(3) * float(covariance)
     return _as_covariance(covariance, 3)
