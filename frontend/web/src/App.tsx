@@ -29,20 +29,24 @@ export function App() {
   }, [lastTick]);
 
   const handleAddWaypoint = (p: Vec2) => {
+    console.log("[app] addWaypoint", p);
     setWaypoints((prev) => [...prev, p]);
   };
 
   const handlePlay = () => {
+    console.log("[app] play clicked", { waypoints, status, connected });
     if (waypoints.length < 2) return;
     send({ type: "set_path", waypoints });
     send({ type: "play" });
   };
 
   const handlePause = () => {
+    console.log("[app] pause clicked");
     send({ type: "pause" });
   };
 
   const handleReset = () => {
+    console.log("[app] reset clicked");
     send({ type: "reset" });
     setWaypoints([]);
   };

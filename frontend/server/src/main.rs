@@ -168,12 +168,14 @@ async fn send_status(sender: &mut futures_util::stream::SplitSink<WebSocket, Mes
 }
 
 async fn handle_socket(socket: WebSocket) {
+    println!("[ws] client connected");
     let (mut sender, mut receiver) = socket.split();
     let mut sim = Sim::new();
     let mut ticker = interval(Duration::from_secs_f64(TICK_DT));
     let mut last_state = sim.state;
 
     if !send_status(&mut sender, sim.state).await {
+        println!("[ws] failed to send initial status; closing");
         return;
     }
 
@@ -182,28 +184,42 @@ async fn handle_socket(socket: WebSocket) {
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        println!("[ws] recv: {text}");
                         let parsed: Result<ClientMsg, _> = serde_json::from_str(&text);
                         match parsed {
-                            Ok(ClientMsg::SetPath { waypoints }) => sim.set_path(waypoints),
+                            Ok(ClientMsg::SetPath { waypoints }) => {
+                                println!("[ws] set_path: {} waypoints", waypoints.len());
+                                sim.set_path(waypoints);
+                            }
                             Ok(ClientMsg::Play) => {
+                                println!(
+                                    "[ws] play (path_len={}, state={:?})",
+                                    sim.path.len(),
+                                    sim.state
+                                );
                                 if sim.path.len() >= 2 && sim.state != SimState::Done {
                                     sim.state = SimState::Running;
                                 }
                             }
                             Ok(ClientMsg::Pause) => {
+                                println!("[ws] pause (state={:?})", sim.state);
                                 if sim.state == SimState::Running {
                                     sim.state = SimState::Paused;
                                 }
                             }
                             Ok(ClientMsg::Reset) => {
+                                println!("[ws] reset");
                                 sim.set_path(vec![]);
                             }
-                            Err(e) => eprintln!("bad message: {e}"),
+                            Err(e) => eprintln!("[ws] bad message: {e} (raw: {text})"),
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        println!("[ws] client closed");
+                        break;
+                    }
                     Some(Err(e)) => {
-                        eprintln!("ws recv error: {e}");
+                        eprintln!("[ws] recv error: {e}");
                         break;
                     }
                     _ => {}
@@ -214,6 +230,7 @@ async fn handle_socket(socket: WebSocket) {
                     let msg = ServerMsg::Tick { t: sim.t, mean, cov };
                     let text = serde_json::to_string(&msg).unwrap();
                     if sender.send(Message::Text(text.into())).await.is_err() {
+                        println!("[ws] send failed; closing");
                         break;
                     }
                 }
@@ -221,12 +238,15 @@ async fn handle_socket(socket: WebSocket) {
         }
 
         if sim.state != last_state {
+            println!("[ws] state {:?} -> {:?}", last_state, sim.state);
             if !send_status(&mut sender, sim.state).await {
                 break;
             }
             last_state = sim.state;
         }
     }
+
+    println!("[ws] handler exited");
 }
 
 async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
