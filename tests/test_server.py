@@ -1271,6 +1271,20 @@ class TestDeadReckoning:
             assert status["gps_denied"] is True
             assert status["estimated_position"]["lat"] is not None
 
+    @pytest.mark.asyncio
+    async def test_gps_denial_before_first_fix_has_fallback_position(self, monkeypatch):
+        """GPS denial before the first GPS fix should not return a null DR position."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.get("/api/gps-deny/on")
+            resp = await ac.get("/api/dead-reckon")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["lat"] is not None
+            assert data["lon"] is not None
+            assert data["estimated_position"]["lat"] is not None
+
 
 # ===================================================================
 # 63-65.  Magnetometer
@@ -1359,6 +1373,71 @@ class TestMagnetometer:
             await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0})
             assert src.server.state.kf_output is not None
             assert len(src.server.state.kf_covariance) == 2
+
+    @pytest.mark.asyncio
+    async def test_mag_correction_toggle(self, monkeypatch):
+        """Documented magnetometer correction toggle controls DR heading source."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/dead-reckon/mag-correction")
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is True
+
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "heading_deg": 35.0})
+            resp = await ac.post("/api/dead-reckon/mag-correction", json={"enabled": False})
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is False
+            assert resp.json()["heading_source"] == "last_gps_heading"
+
+            resp = await ac.post("/api/dead-reckon/mag-correction", json={"enabled": True})
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is True
+
+
+# ===================================================================
+# 66-67.  Live DVL and embedded planner WebSocket
+# ===================================================================
+
+
+class TestLiveDvlAndPlannerWs:
+    @pytest.mark.asyncio
+    async def test_live_dvl_ingest_and_status(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 0.0})
+            resp = await ac.post(
+                "/api/dvl",
+                json={
+                    "velocity_dvl_m_s": [0.5, 0.0, 0.0],
+                    "valid_beams": [True, True, True, True],
+                    "altitude_m": 5.0,
+                    "mode": "bottom",
+                    "status": "valid",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "accepted"
+            assert data["diagnostics"]["raw_measurements"] == 1
+
+            resp = await ac.get("/api/dvl/status")
+            assert resp.status_code == 200
+            assert resp.json()["raw_measurements"] == 1
+
+    def test_fastapi_serves_planner_websocket(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        with StarletteTestClient(clean_app).websocket_connect("/planner/ws") as ws:
+            first = ws_receive(ws)
+            assert first == {"type": "status", "state": "idle"}
+
+            ws.send_json({"type": "set_path", "waypoints": [[0.0, 0.0], [2.0, 0.0]]})
+            ws.send_json({"type": "play"})
+
+            messages = [ws_receive(ws) for _ in range(4)]
+            assert any(msg["type"] == "tick" for msg in messages)
+            assert any(msg == {"type": "status", "state": "running"} for msg in messages)
 
 
 # ===================================================================

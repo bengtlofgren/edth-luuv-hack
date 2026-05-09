@@ -8,9 +8,10 @@ Monorepo for navigation fusion experiments on a corrected DVL + IMU stack.
   layer with raw-DVL correction, frame calibration, optional DVL velocity
   dead-reckoning, runtime diagnostics, a CLI runner, and a streaming pipeline.
   See [`dvl_correction/README.md`](dvl_correction/README.md) for usage.
-- [`imu-drift/`](imu-drift/) - Rust IMU drift and Allan variance library.
-- [`frontend/`](frontend/) - React/Vite mission planner canvas with a Rust
-  WebSocket simulator.
+- [`imu-drift/`](imu-drift/) - Rust IMU drift and Allan variance library plus
+  an offline Allan-variance CLI.
+- [`frontend/`](frontend/) - React/Vite mission planner canvas embedded in the
+  command center, with an optional Rust WebSocket simulator for standalone dev.
 - [`src/`](src/) - FastAPI command-center app with maritime map UI, simulated
   and replayed sensor feeds, waypoints, recording/export, GPS-denial controls,
   and dead-reckoning visualization.
@@ -28,14 +29,10 @@ Open `http://127.0.0.1:8000`.
 
 ## Run The React Planner
 
-In one terminal:
+The command center serves the built planner at `http://127.0.0.1:8000/planner/`
+and provides the planner WebSocket at `/planner/ws`.
 
-```sh
-cd frontend/server
-cargo run
-```
-
-In another:
+For Vite development against the integrated FastAPI WebSocket:
 
 ```sh
 cd frontend/web
@@ -43,7 +40,22 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL, usually `http://127.0.0.1:5173`.
+Open the Vite URL, usually `http://127.0.0.1:5173`, while the command center is
+running on port 8000.
+
+The optional Rust stub still speaks the same WebSocket contract:
+
+```sh
+cd frontend/server
+cargo run
+```
+
+## Offline Allan Variance
+
+```sh
+cd imu-drift
+cargo run --release -- allan-variance --samples imu.csv --dt 0.01 --column gyro_z
+```
 
 ## Checks
 

@@ -25,11 +25,13 @@ except ImportError:
 # Teammate estimation tools
 from dvl_correction import (
     CorrectedDvlMeasurement,
+    DvlCorrectionLayer,
     DvlImuKalmanLayer,
     ImuSample,
     KalmanConfig,
     MagnetometerCorrectionLayer,
     NavigationOutput,
+    RawDvlMeasurement,
     RawMagnetometerMeasurement,
 )
 
@@ -54,6 +56,12 @@ import uvicorn
 
 BUFFER_SIZE = 300
 SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
+PLANNER_TICK_DT = 0.05
+PLANNER_SPEED_MS = 2.0
+PLANNER_COV_GROWTH_DIAG = 0.5
+PLANNER_COV_GROWTH_OFFDIAG = 0.05
+PLANNER_LANDMARK_FIX = 0.6
+PLANNER_INIT_COV = [[0.25, 0.0], [0.0, 0.25]]
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -110,6 +118,23 @@ class PressureData(BaseModel):
 
 class GpsDenialIn(BaseModel):
     enabled: bool
+
+
+class MagCorrectionIn(BaseModel):
+    enabled: bool
+
+
+class DvlData(BaseModel):
+    timestamp_s: float | None = None
+    velocity_dvl_m_s: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    velocity_covariance_dvl: float | list[list[float]] | None = None
+    position_nav_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    position_covariance_nav: float | list[list[float]] | None = None
+    valid_beams: list[bool] | None = None
+    mode: str | None = "bottom"
+    status: str | None = "valid"
+    altitude_m: float | None = None
+    velocity_scale_factor: float = 1.0
 
 
 class WaypointIn(BaseModel):
@@ -178,13 +203,19 @@ class AppState:
 
         # Teammate estimation tools
         self.kf: DvlImuKalmanLayer = DvlImuKalmanLayer(config=KalmanConfig())
+        self.dvl_correction: DvlCorrectionLayer = DvlCorrectionLayer()
         self.mag_correction: MagnetometerCorrectionLayer = MagnetometerCorrectionLayer()
+        self.mag_correction_enabled: bool = True
         self.kf_output: NavigationOutput | None = None
         self.kf_covariance: list[list[float]] = [[1.0, 0.0], [0.0, 1.0]]
         self.nav_origin_lat: float | None = None
         self.nav_origin_lon: float | None = None
         self.latest_accel_m_s2: list[float] | None = None
         self.latest_gyro_rad_s: list[float] | None = None
+        self.dvl_raw_count: int = 0
+        self.dvl_rejected_count: int = 0
+        self.dvl_updates_applied: int = 0
+        self.latest_dvl: dict[str, Any] | None = None
 
         # Real data replay
         self.replay: SimrisReplay = SimrisReplay()
@@ -196,6 +227,7 @@ class AppState:
         self.mag_hard_iron: list[float] = [0.0, 0.0, 0.0]
         self.mag_soft_iron: list[list[float]] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
         self.mag_heading: float = 0.0
+        self.dr_heading_source: str = "magnetometer"
 
         # Embedded metric planner route. Planner x is east, y is north, metres.
         self.planner_path_m: list[tuple[float, float]] = []
@@ -263,6 +295,19 @@ def _latlon_to_nav_m(lat: float, lon: float) -> np.ndarray:
     north_m = (lat - state.nav_origin_lat) * 111320.0
     east_m = (lon - state.nav_origin_lon) * 111320.0 * math.cos(math.radians(state.nav_origin_lat))
     return np.array([east_m, north_m, 0.0], dtype=float)
+
+
+def _nav_m_to_latlon(position_m: Any) -> tuple[float, float] | None:
+    if state.nav_origin_lat is None or state.nav_origin_lon is None:
+        return None
+    pos = np.asarray(position_m, dtype=float)
+    if pos.shape[0] < 2 or not np.all(np.isfinite(pos[:2])):
+        return None
+    east_m = float(pos[0])
+    north_m = float(pos[1])
+    lat = state.nav_origin_lat + north_m / 111320.0
+    lon = state.nav_origin_lon + east_m / (111320.0 * math.cos(math.radians(state.nav_origin_lat)))
+    return lat, lon
 
 
 def _planner_m_to_latlon(x_m: float, y_m: float) -> tuple[float, float]:
@@ -345,6 +390,42 @@ def _planner_geo_route() -> list[dict[str, float]]:
     ]
 
 
+def _metric_path(points: list[tuple[float, float]]) -> tuple[list[float], float]:
+    starts: list[float] = []
+    acc = 0.0
+    for i, point in enumerate(points):
+        starts.append(acc)
+        if i + 1 < len(points):
+            nxt = points[i + 1]
+            acc += math.hypot(nxt[0] - point[0], nxt[1] - point[1])
+    return starts, acc
+
+
+def _xy_on_metric_path(
+    points: list[tuple[float, float]],
+    starts: list[float],
+    total_length_m: float,
+    progress_m: float,
+) -> tuple[float, float]:
+    if not points:
+        return 0.0, 0.0
+    if len(points) == 1 or total_length_m <= 0.0:
+        return points[0]
+
+    progress_m = max(0.0, min(progress_m, total_length_m))
+    segment = len(points) - 2
+    for i in range(len(points) - 1):
+        if progress_m <= starts[i + 1] or i == len(points) - 2:
+            segment = i
+            break
+
+    p0, p1 = points[segment], points[segment + 1]
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    seg_len = max(math.hypot(dx, dy), 1e-9)
+    alpha = max(0.0, min(1.0, (progress_m - starts[segment]) / seg_len))
+    return p0[0] + alpha * dx, p0[1] + alpha * dy
+
+
 def _recalc_drift() -> None:
     """Recalculate drift rate from current gyro bias and accelerometer noise."""
     nf = 1.0 + (math.sqrt(state.accel_variance) / 9.81 if state.accel_variance > 0 else 0)
@@ -387,8 +468,12 @@ def _apply_magnetometer(values: dict[str, float], timestamp_s: float) -> None:
     if corrected is None:
         return
     state.mag_heading = math.degrees(corrected.yaw_magnetic_rad) % 360.0
-    state.dr_heading = state.mag_heading
-    applied = state.kf.update_magnetometer_yaw(corrected)
+    if state.mag_correction_enabled:
+        state.dr_heading = state.mag_heading
+        state.dr_heading_source = "magnetometer"
+        applied = state.kf.update_magnetometer_yaw(corrected)
+    else:
+        applied = False
     _remember_kf_output(state.kf.output(timestamp_s, magnetometer_update_applied=applied))
 
 
@@ -419,6 +504,66 @@ def _gps_denial_summary() -> dict[str, Any]:
     }
 
 
+def _latest_depth_m() -> float | None:
+    pressure_buf = state.buffers.get("pressure")
+    if not pressure_buf:
+        return None
+    return pressure_buf[-1].get("depth_m")
+
+
+def _record_frame(source: str, force: bool = False) -> None:
+    if not state.recording:
+        return
+    now = _now()
+    if not force and now - state.last_record_time < 1.0:
+        return
+
+    last_gps = _latest_gps()
+    if state.gps_denied:
+        lat = state.dr_lat
+        lon = state.dr_lon
+    else:
+        lat = last_gps.get("lat") if last_gps else state.dr_lat
+        lon = last_gps.get("lon") if last_gps else state.dr_lon
+    if lat is None or lon is None:
+        lat, lon = BASE_LAT, BASE_LON
+
+    speed_kn = (
+        state.dr_last_gps_speed_kn
+        if state.gps_denied
+        else (last_gps.get("speed_kn") if last_gps else None)
+    )
+    heading = (
+        state.dr_heading
+        if state.gps_denied
+        else (last_gps.get("heading_deg") if last_gps else state.dr_heading)
+    )
+
+    state.last_record_time = now
+    state.recorded_frames.append({
+        "timestamp": now,
+        "source": source,
+        "gps_denied": state.gps_denied,
+        "vessel1": {
+            "lat": round(float(lat), 6),
+            "lon": round(float(lon), 6),
+            "heading": round(float(heading), 1) if heading is not None else None,
+            "speed": round(float(speed_kn), 2) if speed_kn is not None else None,
+            "speed_unit": "kn",
+            "depth": _latest_depth_m(),
+            "position_source": "dead_reckon" if state.gps_denied else "gps",
+        },
+        "vessel2": {
+            "lat": state.vessel2_lat,
+            "lon": state.vessel2_lon,
+            "heading": state.vessel2_heading,
+            "speed": round(state.vessel2_speed * 1.94384, 2),
+            "speed_unit": "kn",
+            "depth": None,
+        },
+    })
+
+
 def _enable_gps_denial() -> None:
     if not state.gps_denied:
         state.gps_deny_start_time = _now()
@@ -429,9 +574,15 @@ def _enable_gps_denial() -> None:
         state.dr_lon = last.get("lon")
         state.dr_last_gps_speed_kn = last.get("speed_kn") or (SURVEY_SPEED_MS * 1.94384)
         state.dr_heading = last.get("heading_deg") if last.get("heading_deg") is not None else state.mag_heading
+        state.dr_heading_source = "magnetometer" if state.mag_correction_enabled else "last_gps_heading"
+        _ensure_nav_origin(state.dr_lat, state.dr_lon)
     else:
+        state.dr_lat = state.dr_lat if state.dr_lat is not None else BASE_LAT
+        state.dr_lon = state.dr_lon if state.dr_lon is not None else BASE_LON
         state.dr_last_gps_speed_kn = SURVEY_SPEED_MS * 1.94384
         state.dr_heading = state.mag_heading
+        state.dr_heading_source = "magnetometer" if state.mag_correction_enabled else "fallback_heading"
+        _ensure_nav_origin(state.dr_lat, state.dr_lon)
 
 
 def _disable_gps_denial() -> None:
@@ -444,8 +595,13 @@ def _dead_reckon_payload() -> dict[str, Any]:
     last_gps = _latest_gps()
     secs = (now - state.gps_deny_start_time) if state.gps_denied and state.gps_deny_start_time else 0.0
     speed_kn = state.dr_last_gps_speed_kn or (last_gps.get("speed_kn", 0.0) if last_gps else 0.0)
-    uncertainty_m = max(0.0, speed_kn * 0.514444 * secs * state.drift_rate_dps * 0.1)
     heading = state.dr_heading
+    drift_uncertainty_m = max(0.0, speed_kn * 0.514444 * secs * state.drift_rate_dps * 0.1)
+    filter_uncertainty_m = 0.0
+    if state.kf_output is not None:
+        filter_uncertainty_m = float(_navigation_uncertainty_payload(heading).get("uncertainty_m", 0.0))
+    base_uncertainty_m = 3.0 if state.gps_denied else 0.0
+    uncertainty_m = math.hypot(max(base_uncertainty_m, filter_uncertainty_m), drift_uncertainty_m)
     hr = math.radians(heading)
     c, s = math.cos(hr), math.sin(hr)
     lm, ln = (uncertainty_m * 1.5) ** 2, (uncertainty_m * 0.3) ** 2
@@ -455,6 +611,19 @@ def _dead_reckon_payload() -> dict[str, Any]:
     lat = state.dr_lat if state.gps_denied else (last_gps.get("lat") if last_gps else state.dr_lat)
     lon = state.dr_lon if state.gps_denied else (last_gps.get("lon") if last_gps else state.dr_lon)
     fix_type = "dead_reckon" if state.gps_denied else "gps"
+    if state.gps_denied and state.dvl_updates_applied > 0 and state.kf_output is not None:
+        kf_latlon = _nav_m_to_latlon(state.kf_output.position_m)
+        if kf_latlon is not None:
+            lat, lon = kf_latlon
+            state.dr_lat = lat
+            state.dr_lon = lon
+            fix_type = "dead_reckon_dvl_imu"
+    if lat is None or lon is None:
+        lat = BASE_LAT
+        lon = BASE_LON
+        if state.gps_denied:
+            state.dr_lat = lat
+            state.dr_lon = lon
     ellipse = {
         "semi_major_m": round(uncertainty_m * 1.5, 1),
         "semi_minor_m": round(uncertainty_m * 0.3, 1),
@@ -472,7 +641,8 @@ def _dead_reckon_payload() -> dict[str, Any]:
         "gps_age_sec": round(secs, 1),
         "seconds_since_gps": round(secs, 1),
         "fix_type": fix_type,
-        "heading_source": "magnetometer",
+        "heading_source": state.dr_heading_source,
+        "mag_correction_enabled": state.mag_correction_enabled,
         "uncertainty_m": round(uncertainty_m, 1),
         "ellipse": ellipse,
         "uncertainty_ellipse": {
@@ -490,6 +660,9 @@ def _dead_reckon_payload() -> dict[str, Any]:
             "arw_deg_per_sqrt_s": 0.0,
             "total_drift_deg": round(state.drift_rate_dps * secs, 4),
             "position_uncertainty_m": round(uncertainty_m, 1),
+            "filter_uncertainty_m": round(filter_uncertainty_m, 1),
+            "drift_uncertainty_m": round(drift_uncertainty_m, 1),
+            "base_uncertainty_m": round(base_uncertainty_m, 1),
         },
     }
 
@@ -703,6 +876,7 @@ async def post_gps(data: GpsData):
             "heading_deg": heading_deg,
         })
         state.last_gps_time = _now()
+        _record_frame("gps", force=True)
     return {"status": "ok"}
 
 @app.post("/pressure")
@@ -721,6 +895,123 @@ async def post_pressure(data: PressureData):
         "timestamp": _last_ts("pressure"),
     })
     return {"status": "ok"}
+
+
+async def _handle_dvl(data: DvlData) -> dict[str, Any]:
+    """Ingest one raw DVL measurement and fuse it into the navigation filter."""
+    timestamp_s = data.timestamp_s if data.timestamp_s is not None else _now()
+    if not math.isfinite(timestamp_s):
+        raise HTTPException(status_code=400, detail="timestamp_s must be finite")
+    if data.velocity_dvl_m_s is None and data.position_nav_m is None:
+        raise HTTPException(
+            status_code=400,
+            detail="DVL payload requires velocity_dvl_m_s, position_nav_m, or both",
+        )
+    if state.nav_origin_lat is None or state.nav_origin_lon is None:
+        last_gps = _latest_gps()
+        if last_gps and last_gps.get("lat") is not None and last_gps.get("lon") is not None:
+            _ensure_nav_origin(last_gps["lat"], last_gps["lon"])
+        else:
+            _ensure_nav_origin(state.dr_lat if state.dr_lat is not None else BASE_LAT, state.dr_lon if state.dr_lon is not None else BASE_LON)
+
+    raw = RawDvlMeasurement(
+        timestamp_s=timestamp_s,
+        velocity_dvl_m_s=data.velocity_dvl_m_s,
+        velocity_covariance_dvl=data.velocity_covariance_dvl,
+        position_nav_m=data.position_nav_m,
+        position_covariance_nav=data.position_covariance_nav,
+        valid_beams=data.valid_beams,
+        mode=data.mode,
+        status=data.status,
+        altitude_m=data.altitude_m,
+        velocity_scale_factor=data.velocity_scale_factor,
+    )
+    state.dvl_raw_count += 1
+    try:
+        corrected = state.dvl_correction.correct(
+            raw,
+            angular_velocity_body_rad_s=state.latest_gyro_rad_s or [0.0, 0.0, 0.0],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if corrected is None:
+        state.dvl_rejected_count += 1
+        state.latest_dvl = {
+            "timestamp": timestamp_s,
+            "status": "rejected",
+            "reason": "quality_gate",
+        }
+        _buffer_sensor("dvl", state.latest_dvl)
+        await _broadcast({"type": "dvl", **state.latest_dvl})
+        return {
+            "status": "rejected",
+            "reason": "quality_gate",
+            "diagnostics": _dvl_status_payload(),
+        }
+
+    try:
+        update_applied = state.kf.update_corrected_dvl(corrected)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if update_applied:
+        state.dvl_updates_applied += 1
+    _remember_kf_output(state.kf.output(timestamp_s, dvl_update_applied=update_applied))
+
+    if state.gps_denied and state.kf_output is not None:
+        kf_latlon = _nav_m_to_latlon(state.kf_output.position_m)
+        if kf_latlon is not None:
+            state.dr_lat, state.dr_lon = kf_latlon
+            velocity = np.asarray(state.kf_output.velocity_m_s, dtype=float)
+            if velocity.shape[0] >= 2 and np.all(np.isfinite(velocity[:2])):
+                state.dr_last_gps_speed_kn = float(np.linalg.norm(velocity[:2]) * 1.94384)
+
+    velocity_body = None if corrected.velocity_body_m_s is None else [float(v) for v in np.asarray(corrected.velocity_body_m_s)]
+    position_nav = None if corrected.position_nav_m is None else [float(v) for v in np.asarray(corrected.position_nav_m)]
+    uncertainty = _navigation_uncertainty_payload(state.dr_heading)
+    state.latest_dvl = {
+        "timestamp": timestamp_s,
+        "status": "accepted",
+        "dvl_update_applied": update_applied,
+        "velocity_body_m_s": velocity_body,
+        "position_nav_m": position_nav,
+        **uncertainty,
+    }
+    _buffer_sensor("dvl", state.latest_dvl)
+    await _broadcast({"type": "dvl", **state.latest_dvl})
+    _record_frame("dvl", force=True)
+    return {
+        "status": "accepted",
+        "dvl_update_applied": update_applied,
+        "velocity_body_m_s": velocity_body,
+        "position_nav_m": position_nav,
+        "diagnostics": _dvl_status_payload(),
+        **uncertainty,
+    }
+
+
+def _dvl_status_payload() -> dict[str, Any]:
+    return {
+        "raw_measurements": state.dvl_raw_count,
+        "rejected_measurements": state.dvl_rejected_count,
+        "updates_applied": state.dvl_updates_applied,
+        "latest": state.latest_dvl,
+    }
+
+
+@app.post("/dvl")
+async def post_dvl(data: DvlData):
+    return await _handle_dvl(data)
+
+
+@app.post("/api/dvl")
+async def post_api_dvl(data: DvlData):
+    return await _handle_dvl(data)
+
+
+@app.get("/api/dvl/status")
+async def get_dvl_status():
+    return _dvl_status_payload()
 
 # ---------------------------------------------------------------------------
 # State & Track endpoints
@@ -1113,7 +1404,154 @@ async def dead_reckon_status():
         "estimated_position": payload["estimated_position"],
         "drift": payload["drift_stats"],
         "ellipse": payload["ellipse"],
+        "mag_correction_enabled": state.mag_correction_enabled,
     }
+
+
+@app.post("/api/dead-reckon/mag-correction")
+async def set_mag_correction(payload: MagCorrectionIn):
+    state.mag_correction_enabled = payload.enabled
+    if payload.enabled:
+        state.dr_heading = state.mag_heading
+        state.dr_heading_source = "magnetometer"
+    else:
+        last_gps = _latest_gps()
+        if last_gps and last_gps.get("heading_deg") is not None:
+            state.dr_heading = float(last_gps["heading_deg"])
+            state.dr_heading_source = "last_gps_heading"
+        else:
+            state.dr_heading_source = "fallback_heading"
+    return {
+        "enabled": state.mag_correction_enabled,
+        "mag_heading_deg": round(state.mag_heading, 1),
+        "dr_heading_deg": round(state.dr_heading, 1),
+        "heading_source": state.dr_heading_source,
+    }
+
+
+@app.get("/api/dead-reckon/mag-correction")
+async def get_mag_correction():
+    return {
+        "enabled": state.mag_correction_enabled,
+        "mag_heading_deg": round(state.mag_heading, 1),
+        "dr_heading_deg": round(state.dr_heading, 1),
+        "heading_source": state.dr_heading_source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# React planner WebSocket endpoint
+# ---------------------------------------------------------------------------
+
+async def _planner_ws_send_status(ws: WebSocket, sim_state: str) -> None:
+    await ws.send_json({"type": "status", "state": sim_state})
+
+
+def _parse_planner_points(raw_points: Any) -> list[tuple[float, float]]:
+    if not isinstance(raw_points, list):
+        raise ValueError("waypoints must be a list")
+    points: list[tuple[float, float]] = []
+    for raw in raw_points:
+        if not isinstance(raw, list | tuple) or len(raw) != 2:
+            raise ValueError("planner waypoints must be [x_m, y_m] pairs")
+        x_m, y_m = float(raw[0]), float(raw[1])
+        if not (math.isfinite(x_m) and math.isfinite(y_m)):
+            raise ValueError("planner waypoint coordinates must be finite")
+        points.append((x_m, y_m))
+    return points
+
+
+@app.websocket("/planner/ws")
+async def planner_websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    path: list[tuple[float, float]] = []
+    starts: list[float] = []
+    total_length_m = 0.0
+    progress_m = 0.0
+    sim_time_s = 0.0
+    sim_state = "idle"
+    cov = [row[:] for row in PLANNER_INIT_COV]
+    current_segment = 0
+
+    await _planner_ws_send_status(ws, sim_state)
+    last_status_sent = sim_state
+    try:
+        while True:
+            try:
+                text = await asyncio.wait_for(ws.receive_text(), timeout=PLANNER_TICK_DT)
+            except asyncio.TimeoutError:
+                text = None
+
+            if text is not None:
+                try:
+                    import json
+                    msg = json.loads(text)
+                    msg_type = msg.get("type")
+                    if msg_type == "set_path":
+                        path = _parse_planner_points(msg.get("waypoints"))
+                        starts, total_length_m = _metric_path(path)
+                        progress_m = 0.0
+                        sim_time_s = 0.0
+                        cov = [row[:] for row in PLANNER_INIT_COV]
+                        current_segment = 0
+                        sim_state = "idle"
+                        if len(path) >= 2 and total_length_m > 0.0:
+                            _set_planner_path(path)
+                        else:
+                            _clear_planner_path()
+                    elif msg_type == "play":
+                        if len(path) >= 2 and total_length_m > 0.0 and sim_state != "done":
+                            sim_state = "running"
+                            if state.planner_enabled and not state.planner_done:
+                                state.planner_paused = False
+                    elif msg_type == "pause":
+                        if sim_state == "running":
+                            sim_state = "paused"
+                        if state.planner_enabled and not state.planner_done:
+                            state.planner_paused = True
+                    elif msg_type == "reset":
+                        path = []
+                        starts = []
+                        total_length_m = 0.0
+                        progress_m = 0.0
+                        sim_time_s = 0.0
+                        cov = [row[:] for row in PLANNER_INIT_COV]
+                        current_segment = 0
+                        sim_state = "idle"
+                        _clear_planner_path()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+
+            if sim_state == "running":
+                sim_time_s += PLANNER_TICK_DT
+                progress_m = min(total_length_m, progress_m + PLANNER_SPEED_MS * PLANNER_TICK_DT)
+                cov[0][0] += PLANNER_COV_GROWTH_DIAG * PLANNER_TICK_DT
+                cov[1][1] += PLANNER_COV_GROWTH_DIAG * PLANNER_TICK_DT
+                cov[0][1] += PLANNER_COV_GROWTH_OFFDIAG * PLANNER_TICK_DT
+                cov[1][0] = cov[0][1]
+                while current_segment + 1 < len(path) - 1 and progress_m >= starts[current_segment + 1]:
+                    current_segment += 1
+                    cov[0][0] *= PLANNER_LANDMARK_FIX
+                    cov[1][1] *= PLANNER_LANDMARK_FIX
+                    cov[0][1] *= PLANNER_LANDMARK_FIX
+                    cov[1][0] = cov[0][1]
+                if progress_m >= total_length_m:
+                    progress_m = total_length_m
+                    sim_state = "done"
+
+                mean_x, mean_y = _xy_on_metric_path(path, starts, total_length_m, progress_m)
+                await ws.send_json({
+                    "type": "tick",
+                    "t": sim_time_s,
+                    "mean": [mean_x, mean_y],
+                    "cov": cov,
+                })
+
+            if sim_state != last_status_sent:
+                await _planner_ws_send_status(ws, sim_state)
+                last_status_sent = sim_state
+    except WebSocketDisconnect:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1270,6 +1708,13 @@ async def _simulator_loop() -> None:
                 **values,
                 "timestamp": _last_ts(sensor_name),
             })
+            timestamp_s = _last_ts(sensor_name)
+            if sensor_name == "accelerometer":
+                state.latest_accel_m_s2 = [values["x"], values["y"], values["z"]]
+                _maybe_process_imu(timestamp_s)
+            elif sensor_name == "gyroscope":
+                state.latest_gyro_rad_s = [values["x"], values["y"], values["z"]]
+                _maybe_process_imu(timestamp_s)
 
         # ---- Barometer broadcast (separate from IMU, has its own type) ----
         _buffer_sensor("barometer", {"pressure_hpa": round(atmospheric_pressure, 1)})
@@ -1378,22 +1823,7 @@ async def _simulator_loop() -> None:
         })
 
         # ---- Recording: save a frame every second ----
-        if state.recording and _now() - state.last_record_time >= 1.0:
-            state.last_record_time = _now()
-            frame = {
-                "timestamp": _now(),
-                "vessel1": {
-                    "lat": round(lat, 6), "lon": round(lon, 6),
-                    "heading": round(heading, 1), "speed": round(SURVEY_SPEED_MS, 2),
-                    "depth": round(depth, 2),
-                },
-                "vessel2": {
-                    "lat": round(v2_lat, 6), "lon": round(v2_lon, 6),
-                    "heading": round(v2_hdg, 1), "speed": round(V2_SPEED_MS, 2),
-                    "depth": None,
-                },
-            }
-            state.recorded_frames.append(frame)
+        _record_frame("simulator")
 
 # ---------------------------------------------------------------------------
 # Static files (mount after API routes so routes take precedence)

@@ -3,16 +3,15 @@
 Simple UI for planning an underwater drone path and visualising the position
 estimate (mean + covariance) as the drone moves along it.
 
-The frontend is a React/TS/Vite app that talks to a Rust WebSocket server. The
-server is a **stub** that simulates a drone moving along the path with a
-covariance that grows over time and shrinks slightly at each waypoint
-(landmark-fix style). The real estimator backend will replace this stub.
+The frontend is a React/TS/Vite app that talks to the command-center FastAPI
+WebSocket at `/planner/ws` when embedded at `/planner/`. The older Rust server
+under `frontend/server` is still useful as a standalone protocol stub.
 
 ## Layout
 
 ```
 frontend/
-  server/   Rust WS server stub (axum + tokio)
+  server/   Optional Rust WS server stub (axum + tokio)
   web/      Vite + React + TypeScript frontend (react-konva)
 ```
 
@@ -20,7 +19,20 @@ All commands below assume you start from this `frontend/` directory.
 
 ## Run
 
-In one terminal:
+For the integrated command center, build the web bundle and run FastAPI from
+the repository root:
+
+```sh
+cd web
+npm install
+npm run build
+cd ../..
+uvicorn src.server:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/planner/` or the command-center planner drawer.
+
+For standalone Rust stub development, run this instead in one terminal:
 
 ```sh
 cd server
@@ -35,7 +47,9 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL (default `http://localhost:5173`).
+Open the Vite URL (default `http://localhost:5173`). In dev mode the frontend
+connects to `ws://127.0.0.1:8000/planner/ws`, so keep FastAPI running unless
+you temporarily point `web/src/ws.ts` back to the Rust stub.
 
 1. Click on the canvas to drop waypoints (need at least two).
 2. Press **Play**. The drone interpolates along the path; the yellow ellipse
@@ -45,7 +59,9 @@ Open the Vite URL (default `http://localhost:5173`).
 
 ## WebSocket contract
 
-Endpoint: `ws://127.0.0.1:8080/ws`. JSON messages, one per frame.
+Integrated endpoint: `/planner/ws` on the command-center host. JSON messages,
+one per frame. The standalone Rust stub keeps the same contract at
+`ws://127.0.0.1:8080/ws`.
 
 ### Client → Server
 

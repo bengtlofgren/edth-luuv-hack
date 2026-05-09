@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClientMsg, ServerMsg, SimStatus } from "./types";
 
-const WS_URL = "ws://127.0.0.1:8080/ws";
+function plannerWsUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host =
+    window.location.port === "5173" ? "127.0.0.1:8000" : window.location.host;
+  return `${protocol}//${host}/planner/ws`;
+}
+
+const WS_URL = plannerWsUrl();
 const RECONNECT_DELAY_MS = 1000;
 const LOG_TICKS = false;
 

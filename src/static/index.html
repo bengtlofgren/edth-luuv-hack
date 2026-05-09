@@ -104,6 +104,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 @media(max-width:900px){#planner-drawer{top:42px;left:8px;right:8px;bottom:40px}}
 #gpsdeny-btn.denied{background:rgba(212,64,64,0.2)!important;border-color:#d44040!important;color:#d44040!important;animation:pulse 1.5s infinite}
 #gpsdeny-btn.gps-active{background:rgba(0,212,100,0.15);border-color:#00d46a;color:#00d46a}
+#mag-btn.mag-off{background:rgba(212,160,0,0.16)!important;border-color:#d4a000!important;color:#d4a000!important}
 #pos-source.source-dr{color:#f0c040!important}
 .vessel-dr-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px dashed #f0c040;filter:drop-shadow(0 0 5px rgba(240,192,64,0.5))}
 .vessel-denied-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px solid rgba(212,64,64,0.6);filter:drop-shadow(0 0 5px rgba(212,64,64,0.3))}
@@ -132,9 +133,11 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <div class="panel-title">Navigation Status</div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
       <button id="gpsdeny-btn" onclick="toggleGpsDenial()" style="background:rgba(0,212,100,0.15);border:1px solid #00d46a;color:#00d46a;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit">GPS: ACTIVE</button>
+      <button id="mag-btn" onclick="toggleMagCorrection()" style="background:rgba(0,212,170,0.12);border:1px solid rgba(0,212,170,0.35);color:#00d4aa;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit">MAG: ON</button>
       <span id="gpsdeny-timer" style="font-size:11px;color:#7a8aa0;display:none">00:00</span>
     </div>
     <div id="gpsdeny-info" style="font-size:10px;color:#7a8aa0">Position source: <span id="pos-source" style="color:#00d4aa">GPS</span> ± <span id="pos-uncertainty">0.0m</span></div>
+    <div style="font-size:10px;color:#7a8aa0;margin-top:3px">DVL updates: <span id="dvl-updates">0</span> &bull; rejected: <span id="dvl-rejected">0</span></div>
   </div>
   <div class="panel">
     <div class="panel-title">Heading</div>
@@ -262,7 +265,7 @@ var v2={lat:null,lon:null,heading:null,speed:null,trackPoints:[]};
 var recording=false,recStartTime=null,recTimer=null,showingReplay=false,replayPoller=null;
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
-var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
+var gpsDenied=false,magCorrection=true,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
 var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false;
 var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
@@ -324,6 +327,29 @@ function toggleGpsDenial(){
     }).catch(function(){});
   }
 }
+function setMagCorrectionState(enabled){
+  magCorrection=!!enabled;
+  var btn=document.getElementById('mag-btn');
+  if(btn){btn.className=magCorrection?'':'mag-off';btn.textContent=magCorrection?'MAG: ON':'MAG: OFF';}
+}
+function toggleMagCorrection(){
+  fetch('/api/dead-reckon/mag-correction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!magCorrection})}).then(function(r){return r.json();}).then(function(d){
+    setMagCorrectionState(d.enabled);
+    if(gpsDenied)fetchDeadReckon();
+  }).catch(function(){});
+}
+function fetchMagCorrection(){
+  fetch('/api/dead-reckon/mag-correction').then(function(r){return r.json();}).then(function(d){setMagCorrectionState(d.enabled);}).catch(function(){});
+}
+function updateDvlStatus(d){
+  if(!d)return;
+  var updates=d.updates_applied!=null?d.updates_applied:(d.diagnostics&&d.diagnostics.updates_applied);
+  var rejected=d.rejected_measurements!=null?d.rejected_measurements:(d.diagnostics&&d.diagnostics.rejected_measurements);
+  var upEl=document.getElementById('dvl-updates'),rejEl=document.getElementById('dvl-rejected');
+  if(upEl&&updates!=null)upEl.textContent=updates;
+  if(rejEl&&rejected!=null)rejEl.textContent=rejected;
+}
+function fetchDvlStatus(){fetch('/api/dvl/status').then(function(r){return r.json();}).then(updateDvlStatus).catch(function(){});}
 function setGpsDeniedState(denied){
   if(gpsDenied===denied){
     return;
@@ -516,6 +542,7 @@ function focusPlannerRoute(){if(plannerRouteLine&&plannerRouteLine.getBounds().i
 
 Object.assign(window,{
   toggleGpsDenial:toggleGpsDenial,
+  toggleMagCorrection:toggleMagCorrection,
   toggleRecording:toggleRecording,
   startReplay:startReplay,
   stopReplay:stopReplay,
@@ -554,6 +581,7 @@ switch(data.type){
 case'history':var hd=data.data;if(hd){if(hd.gps&&hd.gps.length){var g=hd.gps[hd.gps.length-1];state.lat=g.lat;state.lon=g.lon;state.speed=g.speed_kn||0;state.heading=g.heading_deg!=null?g.heading_deg:null;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,g);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);}if(hd.pressure&&hd.pressure.length){var p=hd.pressure[hd.pressure.length-1];if(p.depth_m!=null)updateDepth(p.depth_m);}if(hd.barometer&&hd.barometer.length){var b=hd.barometer[hd.barometer.length-1];if(b.pressure_hpa!=null)updateBarometer(b.pressure_hpa);}}break;
 case'gps':if(data.lat!=null&&data.lon!=null){if(isV2){v2.lat=data.lat;v2.lon=data.lon;v2.heading=data.heading_deg!=null?data.heading_deg:v2.heading;v2.speed=data.speed_kn!=null?data.speed_kn:v2.speed;updateVessel2Marker(v2.lat,v2.lon,v2.heading);appendV2TrackPoint(v2.lat,v2.lon);}else{state.lat=data.lat;state.lon=data.lon;state.heading=data.heading_deg!=null?data.heading_deg:state.heading;state.speed=data.speed_kn!=null?data.speed_kn:state.speed;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,data);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);appendTrackPoint(state.lat,state.lon);drawCompass(state.heading);}updateFleetPanel();}break;
 case'dead_reckon':updateDRVisualization(data);break;
+case'dvl':fetchDvlStatus();break;
 case'pressure':if(data.depth_m!=null)updateDepth(data.depth_m);break;
 case'barometer':if(data.pressure_hpa!=null)updateBarometer(data.pressure_hpa);break;
 }};
@@ -612,7 +640,7 @@ function checkGpsDenialStatus(){
 }
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closePlanner();});
 // Init
-document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
+document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);fetchMagCorrection();fetchDvlStatus();setInterval(fetchDvlStatus,5000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
 });
 })();
 </script>
