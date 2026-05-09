@@ -777,9 +777,66 @@ class TestRisk:
             resp = await ac.get("/api/risk")
             assert resp.status_code == 200
             data = resp.json()
+            assert data["route_source"] == "waypoints"
             assert len(data["segments"]) == 2  # 3 waypoints -> 2 segments
             assert "mission_risk" in data
             assert "imu" in data
+
+    @pytest.mark.asyncio
+    async def test_risk_uses_planner_route_without_waypoints(self, monkeypatch):
+        """Risk follows the embedded planner route even when map waypoints are empty."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/planner/path", json={"waypoints": [[0, 0], [100, 0]]})
+            assert resp.status_code == 200
+
+            resp = await ac.get("/api/risk")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["route_source"] == "planner"
+            assert len(data["segments"]) == 1
+            assert data["mission_risk"] > 0.0
+            seg = data["segments"][0]
+            assert seg["from_lat"] == pytest.approx(src.server.BASE_LAT)
+            assert seg["from_lon"] == pytest.approx(src.server.BASE_LON)
+            assert seg["to_lon"] > seg["from_lon"]
+            for key in ("dvl", "uncertainty", "sensors"):
+                assert key in seg["factors"]
+
+    @pytest.mark.asyncio
+    async def test_risk_prefers_planner_then_falls_back_to_waypoints(self, monkeypatch):
+        """Planner route is the active risk source until it is cleared."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post("/api/waypoints", json={"lat": 56.16, "lon": 15.59})
+            await ac.post("/api/waypoints", json={"lat": 56.18, "lon": 15.60})
+            await ac.post("/api/planner/path", json={"waypoints": [[0, 0], [50, 0], [50, 25]]})
+
+            resp = await ac.get("/api/risk")
+            data = resp.json()
+            assert data["route_source"] == "planner"
+            assert len(data["segments"]) == 2
+
+            await ac.post("/api/planner/clear")
+            resp = await ac.get("/api/risk")
+            data = resp.json()
+            assert data["route_source"] == "waypoints"
+            assert len(data["segments"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_risk_respects_zero_gps_speed(self, monkeypatch):
+        """A stopped vessel should produce long travel time instead of default cruise speed."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post("/gps", json={"lat": src.server.BASE_LAT, "lon": src.server.BASE_LON, "speed_kn": 0.0})
+            await ac.post("/api/planner/path", json={"waypoints": [[0, 0], [100, 0]]})
+
+            resp = await ac.get("/api/risk")
+            data = resp.json()
+            assert data["segments"][0]["travel_time_sec"] > 900.0
 
     @pytest.mark.asyncio
     async def test_risk_increases_with_drift(self, monkeypatch):
@@ -855,7 +912,7 @@ class TestRisk:
             assert "heading_error_deg" in seg
             assert "avg_depth_m" in seg
             assert 0.0 <= seg["risk_score"] <= 1.0
-            for key in ("drift", "gps", "distance", "depth"):
+            for key in ("drift", "gps", "distance", "depth", "dvl", "uncertainty", "sensors"):
                 assert key in seg["factors"]
 
 

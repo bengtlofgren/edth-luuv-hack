@@ -1795,49 +1795,206 @@ async def planner_status():
 # Risk assessment API
 # ---------------------------------------------------------------------------
 
+def _clamp01(value: float) -> float:
+    if not math.isfinite(value):
+        return 1.0
+    return max(0.0, min(1.0, value))
+
+
+def _active_risk_route() -> tuple[str, list[dict[str, Any]]]:
+    """Return the route that the operator is actually using for risk scoring."""
+    if state.planner_enabled and len(state.planner_path_m) >= 2:
+        points = []
+        for i, (x_m, y_m) in enumerate(state.planner_path_m, start=1):
+            lat, lon = _planner_m_to_latlon(x_m, y_m)
+            points.append({
+                "id": i,
+                "name": f"P{i}",
+                "lat": lat,
+                "lon": lon,
+                "x_m": x_m,
+                "y_m": y_m,
+            })
+        return "planner", points
+
+    if len(state.waypoints) >= 2:
+        return "waypoints", [
+            {
+                "id": wp["id"],
+                "name": wp.get("name"),
+                "lat": wp["lat"],
+                "lon": wp["lon"],
+            }
+            for wp in state.waypoints
+        ]
+
+    return "none", []
+
+
+def _latest_speed_m_s() -> float:
+    last_gps = _latest_gps()
+    if last_gps and last_gps.get("speed_kn") is not None:
+        speed_kn = float(last_gps["speed_kn"])
+        if math.isfinite(speed_kn) and speed_kn >= 0.0:
+            return speed_kn * 0.514444
+    return SURVEY_SPEED_MS
+
+
+def _segment_depth_stats(lat1: float, lon1: float, lat2: float, lon2: float) -> dict[str, Any]:
+    distance_m = _haversine(lat1, lon1, lat2, lon2)
+    sample_count = max(2, min(60, int(distance_m // 25.0) + 2))
+    depths: list[float] = []
+    unknown_count = 0
+    shallow_count = 0
+    for i in range(sample_count):
+        alpha = i / max(1, sample_count - 1)
+        lat = lat1 + (lat2 - lat1) * alpha
+        lon = lon1 + (lon2 - lon1) * alpha
+        depth = get_depth(lat, lon)
+        if depth is None:
+            unknown_count += 1
+            continue
+        depths.append(float(depth))
+        if depth < state.safety_config["min_depth_m"]:
+            shallow_count += 1
+
+    if depths:
+        min_depth = min(depths)
+        avg_depth = sum(depths) / len(depths)
+    else:
+        min_depth = None
+        avg_depth = None
+
+    return {
+        "sample_count": sample_count,
+        "known_count": len(depths),
+        "unknown_count": unknown_count,
+        "shallow_count": shallow_count,
+        "min_depth_m": min_depth,
+        "avg_depth_m": avg_depth,
+    }
+
+
+def _risk_depth_factor(depth_stats: dict[str, Any]) -> float:
+    min_depth = depth_stats["min_depth_m"]
+    if min_depth is None:
+        return 0.85
+    safe_depth = state.safety_config["min_depth_m"]
+    if min_depth <= safe_depth:
+        return 1.0
+    clearance = min_depth - safe_depth
+    unknown_penalty = 0.25 * (depth_stats["unknown_count"] / max(1, depth_stats["sample_count"]))
+    return _clamp01(math.exp(-clearance / 12.0) + unknown_penalty)
+
+
+def _risk_dvl_factor(dvl_status: dict[str, Any]) -> float:
+    if state.gps_denied:
+        if dvl_status["updates_applied"] <= 0:
+            return 1.0
+        if dvl_status["last_age_sec"] is None:
+            return 0.9
+        return _clamp01(float(dvl_status["last_age_sec"]) / 10.0)
+    if dvl_status["raw_measurements"] <= 0:
+        return 0.25
+    rejection_ratio = dvl_status["rejected_measurements"] / max(1, dvl_status["raw_measurements"])
+    age = 0.0 if dvl_status["last_age_sec"] is None else float(dvl_status["last_age_sec"])
+    return _clamp01(0.65 * rejection_ratio + 0.35 * min(age / 30.0, 1.0))
+
+
+def _risk_sensor_factor(health: dict[str, Any]) -> float:
+    sensors = health.get("sensors", {})
+    bad = 0
+    required = ("accelerometer", "gyroscope", "magnetometer")
+    for name in required:
+        if not sensors.get(name, {}).get("ok", False):
+            bad += 1
+    if not sensors.get("gps", {}).get("ok", False) and not state.gps_denied:
+        bad += 1
+    return _clamp01(bad / 4.0)
+
+
+def _risk_uncertainty_factor() -> float:
+    payload = _dead_reckon_payload() if state.gps_denied else _navigation_uncertainty_payload(
+        (_latest_gps() or {}).get("heading_deg")
+    )
+    uncertainty_m = float(payload.get("uncertainty_m", 0.0) or 0.0)
+    limit = max(1.0, state.safety_config["max_uncertainty_m"])
+    return _clamp01(uncertainty_m / limit)
+
+
 @app.get("/api/risk")
 async def get_risk():
     now = _now()
-    gps_age = (now - state.last_gps_time) if state.last_gps_time is not None else 9999.0
-    speed = SURVEY_SPEED_MS
-    gps_buf = state.buffers.get("gps")
-    if gps_buf and gps_buf[-1].get("speed_kn"):
-        speed = gps_buf[-1]["speed_kn"] * 0.514444
+    gps_age_value = _gps_age_sec(now)
+    gps_age = gps_age_value if gps_age_value is not None else 9999.0
+    speed = _latest_speed_m_s()
+    route_source, route_points = _active_risk_route()
+    dvl_status = _dvl_status_payload()
+    health = _health_payload()
+    uncertainty_factor = _risk_uncertainty_factor()
+    dvl_factor = _risk_dvl_factor(dvl_status)
+    sensor_factor = _risk_sensor_factor(health)
+    gps_factor = 1.0 if gps_age_value is None else _clamp01(1.0 - math.exp(-gps_age / 120.0))
+    if state.gps_denied:
+        gps_factor = max(gps_factor, 0.8)
 
-    segments = []
-    for i in range(len(state.waypoints) - 1):
-        wp1, wp2 = state.waypoints[i], state.waypoints[i + 1]
+    segments: list[dict[str, Any]] = []
+    for i in range(len(route_points) - 1):
+        wp1, wp2 = route_points[i], route_points[i + 1]
         d = _haversine(wp1["lat"], wp1["lon"], wp2["lat"], wp2["lon"])
         travel_time = d / max(speed, 0.1)
         heading_error = state.drift_rate_dps * travel_time
-        mid_lat = (wp1["lat"] + wp2["lat"]) / 2
-        mid_lon = (wp1["lon"] + wp2["lon"]) / 2
-        depth = get_depth(mid_lat, mid_lon) or 50.0
-        risk_drift = min(heading_error / 30.0, 1.0)
-        risk_gps = 1.0 - math.exp(-gps_age / 120.0)
-        risk_distance = min(d / 2000.0, 1.0)
-        risk_depth = math.exp(-depth / 15.0)
-        risk_score = 0.35 * risk_drift + 0.30 * risk_gps + 0.15 * risk_distance + 0.20 * risk_depth
-        risk_score = max(0.0, min(1.0, risk_score))
+        depth_stats = _segment_depth_stats(wp1["lat"], wp1["lon"], wp2["lat"], wp2["lon"])
+        risk_drift = _clamp01(max(heading_error / 30.0, uncertainty_factor * 0.75))
+        risk_gps = gps_factor
+        risk_distance = _clamp01(d / state.safety_config["max_route_length_m"])
+        risk_depth = _risk_depth_factor(depth_stats)
+        risk_score = (
+            0.24 * risk_drift
+            + 0.20 * risk_gps
+            + 0.14 * risk_distance
+            + 0.18 * risk_depth
+            + 0.10 * dvl_factor
+            + 0.08 * uncertainty_factor
+            + 0.06 * sensor_factor
+        )
+        if depth_stats["shallow_count"] > 0:
+            risk_score = max(risk_score, 0.85)
+        if depth_stats["min_depth_m"] is None:
+            risk_score = max(risk_score, 0.55)
+        risk_score = _clamp01(risk_score)
         segments.append({
             "from_id": wp1["id"],
             "to_id": wp2["id"],
             "from_name": wp1.get("name"),
             "to_name": wp2.get("name"),
+            "from_lat": wp1["lat"],
+            "from_lon": wp1["lon"],
+            "to_lat": wp2["lat"],
+            "to_lon": wp2["lon"],
             "distance_m": round(d, 1),
+            "travel_time_sec": round(travel_time, 1),
             "risk_score": round(risk_score, 3),
             "factors": {
                 "drift": round(risk_drift, 3),
                 "gps": round(risk_gps, 3),
                 "distance": round(risk_distance, 3),
                 "depth": round(risk_depth, 3),
+                "dvl": round(dvl_factor, 3),
+                "uncertainty": round(uncertainty_factor, 3),
+                "sensors": round(sensor_factor, 3),
             },
             "heading_error_deg": round(heading_error, 2),
-            "avg_depth_m": round(depth, 1),
+            "avg_depth_m": None if depth_stats["avg_depth_m"] is None else round(depth_stats["avg_depth_m"], 1),
+            "min_depth_m": None if depth_stats["min_depth_m"] is None else round(depth_stats["min_depth_m"], 1),
+            "unknown_depth_samples": depth_stats["unknown_count"],
+            "shallow_depth_samples": depth_stats["shallow_count"],
         })
 
     mission_risk = max((s["risk_score"] for s in segments), default=0.0)
     return {
+        "route_source": route_source,
+        "route_points": route_points,
         "segments": segments,
         "mission_risk": mission_risk,
         "imu": {
@@ -1846,6 +2003,8 @@ async def get_risk():
             "accel_variance": round(state.accel_variance, 4),
             "last_gps_sec": round(gps_age, 1),
         },
+        "dvl": dvl_status,
+        "health": {"status": health["status"], "uncertainty_reasons": health["estimator"]["uncertainty_reasons"]},
     }
 
 

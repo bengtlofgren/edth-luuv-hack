@@ -237,6 +237,14 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       IMU drift: <span id="risk-drift">--</span> &bull;
       GPS age: <span id="risk-gps-age">--</span>
     </div>
+    <div style="font-size:10px;color:#7a8aa0;margin-top:2px">
+      Route: <span id="risk-route">--</span> &bull;
+      DVL: <span id="risk-dvl">--</span>
+    </div>
+    <div style="font-size:10px;color:#7a8aa0;margin-top:2px">
+      Uncertainty: <span id="risk-uncertainty">--</span> &bull;
+      Min depth: <span id="risk-depth">--</span>
+    </div>
   </div>
   <div class="panel">
     <div class="panel-title">Barometric Pressure</div>
@@ -706,8 +714,9 @@ function renderWpList(){var el=document.getElementById('wp-list');if(!wpMarkers.
 
 // Risk
 function riskColor(score){if(score<0.3)return'#00d46a';if(score<0.6)return'#d4a000';return'#d44040';}
-function updateRiskPolyline(segments){riskLayerGroup.clearLayers();if(!segments||!segments.length)return;var coords=wpMarkers.map(function(m){return[m.getLatLng().lat,m.getLatLng().lng];});if(coords.length<2)return;for(var i=0;i<segments.length&&i<coords.length-1;i++){var seg=segments[i];var line=L.polyline([coords[i],coords[i+1]],{color:riskColor(seg.risk_score),weight:3,opacity:0.8});line.bindTooltip('WP'+seg.from_id+' -> '+seg.to_id+': '+seg.distance_m.toFixed(0)+'m | Risk: '+(seg.risk_score*100).toFixed(0)+'% | Depth: '+(seg.avg_depth_m||'?')+'m',{sticky:true});riskLayerGroup.addLayer(line);}}
-function fetchRisk(){fetch('/api/risk').then(function(r){return r.json();}).then(function(data){updateRiskPolyline(data.segments);var score=data.mission_risk;var el=document.getElementById('risk-score');var bar=document.getElementById('risk-bar');var cls=score<0.3?'risk-low':score<0.6?'risk-med':'risk-high';el.textContent=(score*100).toFixed(0)+'%';el.className=cls;bar.style.background='linear-gradient(to right, #00d46a, #d4a000 '+(score*100)+'%, #1a3050 100%)';bar.style.width='100%';if(data.imu){document.getElementById('risk-drift').textContent=data.imu.drift_rate_dps.toFixed(3)+'/s';document.getElementById('risk-gps-age').textContent=data.imu.last_gps_sec.toFixed(0)+'s';}}).catch(function(){});}
+function segmentCoords(seg,i){if(seg&&seg.from_lat!=null&&seg.from_lon!=null&&seg.to_lat!=null&&seg.to_lon!=null)return[[seg.from_lat,seg.from_lon],[seg.to_lat,seg.to_lon]];if(i<wpMarkers.length-1){var a=wpMarkers[i].getLatLng(),b=wpMarkers[i+1].getLatLng();return[[a.lat,a.lng],[b.lat,b.lng]];}return null;}
+function updateRiskPolyline(segments){riskLayerGroup.clearLayers();if(!segments||!segments.length)return;for(var i=0;i<segments.length;i++){var seg=segments[i];var coords=segmentCoords(seg,i);if(!coords)continue;var line=L.polyline(coords,{color:riskColor(seg.risk_score),weight:4,opacity:0.85});var depth=seg.min_depth_m!=null?seg.min_depth_m.toFixed(1):(seg.avg_depth_m!=null?seg.avg_depth_m.toFixed(1):'?');var label=(seg.from_name||('P'+seg.from_id))+' -> '+(seg.to_name||('P'+seg.to_id));line.bindTooltip(label+': '+seg.distance_m.toFixed(0)+'m | Risk: '+(seg.risk_score*100).toFixed(0)+'% | Min depth: '+depth+'m',{sticky:true});riskLayerGroup.addLayer(line);}}
+function fetchRisk(){fetch('/api/risk').then(function(r){return r.json();}).then(function(data){updateRiskPolyline(data.segments);var score=data.mission_risk;var el=document.getElementById('risk-score');var bar=document.getElementById('risk-bar');var cls=score<0.3?'risk-low':score<0.6?'risk-med':'risk-high';el.textContent=(score*100).toFixed(0)+'%';el.className=cls;bar.style.background='linear-gradient(to right, #00d46a, #d4a000 '+(score*100)+'%, #1a3050 100%)';bar.style.width='100%';if(data.imu){document.getElementById('risk-drift').textContent=data.imu.drift_rate_dps.toFixed(3)+'/s';document.getElementById('risk-gps-age').textContent=data.imu.last_gps_sec.toFixed(0)+'s';}document.getElementById('risk-route').textContent=data.route_source||'none';if(data.dvl){var dvlText=data.dvl.updates_applied>0?'tracking':(data.dvl.raw_measurements>0?'raw only':'none');document.getElementById('risk-dvl').textContent=dvlText;}var maxUncertainty=0,minDepth=null;if(data.segments&&data.segments.length){data.segments.forEach(function(seg){if(seg.factors&&seg.factors.uncertainty>maxUncertainty)maxUncertainty=seg.factors.uncertainty;if(seg.min_depth_m!=null&&(minDepth==null||seg.min_depth_m<minDepth))minDepth=seg.min_depth_m;});}document.getElementById('risk-uncertainty').textContent=(maxUncertainty*100).toFixed(0)+'%';document.getElementById('risk-depth').textContent=minDepth==null?'unknown':minDepth.toFixed(1)+'m';}).catch(function(){});}
 
 function checkGpsDenialStatus(){
   fetch('/api/gps-deny/status').then(function(r){return r.json();}).then(function(d){
