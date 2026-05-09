@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-src 'self'; child-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-src 'self'; child-src 'self'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
 <title>Maritime Mission Planner — Demo 5: Command Center</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H">
 <style>
@@ -108,6 +108,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .vessel-dr-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px dashed #f0c040;filter:drop-shadow(0 0 5px rgba(240,192,64,0.5))}
 .vessel-denied-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px solid rgba(212,64,64,0.6);filter:drop-shadow(0 0 5px rgba(212,64,64,0.3))}
 .vessel-gps-frozen{width:16px;height:16px;border-radius:50%;background:rgba(0,212,170,0.25);border:2px solid rgba(0,212,170,0.3);opacity:0.5}
+.support-vessel-dot{width:12px;height:12px;border-radius:50%;background:#7fb3d5;border:2px solid #08111f;box-shadow:0 0 8px rgba(127,179,213,0.75)}
 #gpsdeny-banner{display:none;background:rgba(212,64,64,0.25);color:#d44040;border:1px solid rgba(212,64,64,0.4);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
 #gpsdeny-banner.visible{display:inline}
 #rec-badge{display:none;background:rgba(212,64,64,0.2);color:#d44040;border:1px solid rgba(212,64,64,0.3);border-radius:3px;padding:1px 6px;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;vertical-align:middle}
@@ -263,6 +264,7 @@ var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,ves
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
 var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
 var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false;
+var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
 function hostPort(){return window.location.hostname+':'+(window.location.port||8000);}
 function degToCompass(d){if(d==null||isNaN(d))return'---';var dirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];return dirs[Math.round(d/22.5)%16];}
@@ -414,8 +416,7 @@ if(heading==null||isNaN(heading))return L.divIcon({html:'<div style="width:16px;
 return L.divIcon({html:'<div class="vessel-arrow" style="width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px solid #00d4aa;filter:drop-shadow(0 0 5px #00d4aa);transition:transform 0.25s ease;"></div>',iconSize:[20,24],iconAnchor:[10,12],className:''});
 }
 function createVessel2Icon(heading){
-if(heading==null||isNaN(heading))return L.divIcon({html:'<div style="width:14px;height:14px;border-radius:50%;background:#f0a030;box-shadow:0 0 8px #f0a030;border:2px solid rgba(240,160,48,0.6);"></div>',iconSize:[14,14],iconAnchor:[7,7],className:''});
-return L.divIcon({html:'<div class="vessel2-arrow" style="width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:18px solid #f0a030;filter:drop-shadow(0 0 5px #f0a030);transition:transform 0.25s ease;"></div>',iconSize:[18,22],iconAnchor:[9,11],className:''});
+return L.divIcon({html:'<div class="support-vessel-dot"></div>',iconSize:[16,16],iconAnchor:[8,8],className:''});
 }
 
 function updateVesselMarker(lat,lon,heading){
@@ -428,15 +429,14 @@ if(state.follow)map.panTo([lat,lon],{animate:true,duration:0.3});
 
 function updateVessel2Marker(lat,lon,heading){
 if(!vessel2Marker){vessel2Marker=L.marker([lat,lon],{icon:createVessel2Icon(heading),zIndexOffset:999}).addTo(map);
-vessel2Marker.on('click',function(){var hdg=(v2.heading!=null&&!isNaN(v2.heading))?v2.heading.toFixed(1)+'&deg;':'---';var spd=(v2.speed!=null)?v2.speed.toFixed(1)+' kn':'---';vessel2Marker.bindPopup('<span style="color:#f0a030">Support Vessel</span><br>Lat: '+v2.lat.toFixed(6)+'<br>Lon: '+v2.lon.toFixed(6)+'<br>Speed: '+spd+'<br>Heading: '+hdg).openPopup();});}
-else{vessel2Marker.setLatLng([lat,lon]);var hasArrow=heading!=null&&!isNaN(heading);if(hasArrow!==(vessel2Marker.options.icon.options.html.indexOf('vessel2-arrow')!==-1))vessel2Marker.setIcon(createVessel2Icon(heading));}
-if(heading!=null&&!isNaN(heading)){var arr=document.querySelector('.vessel2-arrow');if(arr)arr.style.transform='rotate('+heading+'deg)';}
+vessel2Marker.on('click',function(){var hdg=(v2.heading!=null&&!isNaN(v2.heading))?v2.heading.toFixed(1)+'&deg;':'---';var spd=(v2.speed!=null)?v2.speed.toFixed(1)+' kn':'---';vessel2Marker.bindPopup('<span style="color:#7fb3d5">Support Vessel</span><br>Lat: '+v2.lat.toFixed(6)+'<br>Lon: '+v2.lon.toFixed(6)+'<br>Speed: '+spd+'<br>Heading: '+hdg).openPopup();});}
+else{vessel2Marker.setLatLng([lat,lon]);}
 }
 
 function refreshTrack(){if(state.trackPoints.length===0){if(trackPolyline){map.removeLayer(trackPolyline);trackPolyline=null;}return;}
 if(!trackPolyline){trackPolyline=L.polyline(state.trackPoints,{color:'#00d4aa',weight:2,opacity:0.7}).addTo(map);}else{trackPolyline.setLatLngs(state.trackPoints);}}
 function refreshV2Track(){if(v2.trackPoints.length===0){if(vessel2TrackPolyline){map.removeLayer(vessel2TrackPolyline);vessel2TrackPolyline=null;}return;}
-if(!vessel2TrackPolyline){vessel2TrackPolyline=L.polyline(v2.trackPoints,{color:'#f0a030',weight:2,opacity:0.6}).addTo(map);}else{vessel2TrackPolyline.setLatLngs(v2.trackPoints);}}
+if(!vessel2TrackPolyline){vessel2TrackPolyline=L.polyline(v2.trackPoints,{color:'#7fb3d5',weight:2,opacity:0.55}).addTo(map);}else{vessel2TrackPolyline.setLatLngs(v2.trackPoints);}}
 function appendTrackPoint(lat,lon){state.trackPoints.push([lat,lon]);if(state.trackPoints.length>2000)state.trackPoints.splice(0,state.trackPoints.length-2000);refreshTrack();}
 function appendV2TrackPoint(lat,lon){v2.trackPoints.push([lat,lon]);if(v2.trackPoints.length>2000)v2.trackPoints.splice(0,v2.trackPoints.length-2000);refreshV2Track();}
 
@@ -449,7 +449,7 @@ document.getElementById('gps-heading').innerHTML=(heading!=null&&!isNaN(heading)
 function updateFleetPanel(){
 var v1s=state.lat!=null?state.lat.toFixed(4):'---';var v1h=(state.heading!=null&&!isNaN(state.heading))?state.heading.toFixed(1)+'&deg;':'---';
 document.getElementById('fleet-v1').innerHTML='<span style="color:#00d4aa">&#9679;</span> Vessel 1: '+v1s+' | '+v1h;
-if(v2.lat!=null){document.getElementById('fleet-v2').innerHTML='<span style="color:#f0a030">&#9679;</span> Support: '+v2.lat.toFixed(4)+' | '+((v2.heading!=null&&!isNaN(v2.heading))?v2.heading.toFixed(1)+'&deg;':'---');}
+if(v2.lat!=null){document.getElementById('fleet-v2').innerHTML='<span style="color:#7fb3d5">&#9679;</span> Support: '+v2.lat.toFixed(4)+' | '+((v2.heading!=null&&!isNaN(v2.heading))?v2.heading.toFixed(1)+'&deg;':'---');}
 else{document.getElementById('fleet-v2').innerHTML='<span style="color:#5a6a80">&#9679;</span> Support: awaiting signal';}
 document.getElementById('fleet-count').textContent=(v2.lat!=null?2:1)+' vessel'+(v2.lat!=null?'s':'')+' tracked';
 }
@@ -508,15 +508,16 @@ Object.assign(window,{
 });
 
 // Tile layers
-var baseLayers={};var overlays={};var currentBase='seabed';
+var baseLayers={};var overlays={};var currentBase='osm';
 function ensureTiles(){
-if(!baseLayers.osm){baseLayers.osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; <a href="https://openstreetmap.org">OSM</a>'});}
-if(!baseLayers.seabed){baseLayers.seabed=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,attribution:'&copy; <a href="https://www.esri.com">Esri</a> | GEBCO, NOAA, Garmin'});}
-if(!baseLayers.satellite){baseLayers.satellite=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,attribution:'&copy; <a href="https://www.esri.com">Esri</a>'});}
-if(!overlays.nautical){overlays.nautical=L.tileLayer('https://tiles.openseamap.org/seamap/{z}/{x}/{y}.png',{maxZoom:18,opacity:0.75,attribution:'&copy; <a href="https://openseamap.org">OpenSeaMap</a>'});}
-if(!overlays.seamarks){overlays.seamarks=L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',{maxZoom:18,opacity:0.9,attribution:'&copy; <a href="https://openseamap.org">OpenSeaMap</a>'});}
+if(!baseLayers.osm){baseLayers.osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxNativeZoom:19,maxZoom:MAX_DISPLAY_ZOOM,attribution:'&copy; <a href="https://openstreetmap.org">OSM</a>'});}
+if(!baseLayers.seabed){baseLayers.seabed=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:MAX_DISPLAY_ZOOM,attribution:'&copy; <a href="https://www.esri.com">Esri</a> | GEBCO, NOAA, Garmin'});baseLayers.seabed.on('tileerror',function(){fallbackBaseMap('seabed');});}
+if(!baseLayers.satellite){baseLayers.satellite=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:18,maxZoom:MAX_DISPLAY_ZOOM,attribution:'&copy; <a href="https://www.esri.com">Esri</a>'});baseLayers.satellite.on('tileerror',function(){fallbackBaseMap('satellite');});}
+if(!overlays.nautical){overlays.nautical=L.tileLayer('https://tiles.openseamap.org/seamap/{z}/{x}/{y}.png',{maxNativeZoom:18,maxZoom:MAX_DISPLAY_ZOOM,opacity:0.75,attribution:'&copy; <a href="https://openseamap.org">OpenSeaMap</a>'});}
+if(!overlays.seamarks){overlays.seamarks=L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',{maxNativeZoom:18,maxZoom:MAX_DISPLAY_ZOOM,opacity:0.9,attribution:'&copy; <a href="https://openseamap.org">OpenSeaMap</a>'});}
 if(!overlays.bathy){overlays.bathy=L.tileLayer.wms('https://ows.emodnet-bathymetry.eu/wms',{layers:'emodnet:mean_atlas_land',format:'image/png',transparent:true,opacity:0.55,attribution:'&copy; <a href="https://emodnet-bathymetry.eu">EMODnet</a>'});}
 }
+function fallbackBaseMap(name){if(currentBase===name&&name!=='osm'){switchBase('osm');if(!tileFallbackShown){tileFallbackShown=true;showToast('Map tiles unavailable; switched to standard map.');}}}
 function switchBase(name){ensureTiles();if(currentBase&&baseLayers[currentBase]&&map.hasLayer(baseLayers[currentBase]))map.removeLayer(baseLayers[currentBase]);if(baseLayers[name]){baseLayers[name].addTo(map);currentBase=name;}document.querySelectorAll('.map-btn-base').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-layer')===name);});}
 function toggleOverlay(name){ensureTiles();var layer=overlays[name];if(!layer)return;if(map.hasLayer(layer))map.removeLayer(layer);else layer.addTo(map);var btn=document.querySelector('.map-btn-overlay[data-layer="'+name+'"]');if(btn)btn.classList.toggle('active',map.hasLayer(layer));}
 
@@ -539,13 +540,13 @@ ws.onerror=function(){};
 
 // Map Init
 function initMap(lat,lon){
-map=L.map('map',{center:[lat,lon],zoom:16,zoomControl:true,attributionControl:true});
-riskLayerGroup.addTo(map);ensureTiles();baseLayers.seabed.addTo(map);overlays.nautical.addTo(map);
+map=L.map('map',{center:[lat,lon],zoom:16,maxZoom:MAX_DISPLAY_ZOOM,zoomControl:true,attributionControl:true});
+riskLayerGroup.addTo(map);ensureTiles();baseLayers.osm.addTo(map);overlays.nautical.addTo(map);
 map.on('click',function(e){var ll=e.latlng;var content=ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br><span style="color:#7a8aa0">Fetching depth...</span>';var popup=L.popup().setLatLng(ll).setContent(content).openOn(map);fetch('/api/depth?lat='+ll.lat.toFixed(6)+'&lon='+ll.lng.toFixed(6)).then(function(r){return r.json();}).then(function(d){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br>Depth: <b>'+(d.depth_m?d.depth_m.toFixed(1)+' m':'no data / land')+'</b>');}).catch(function(){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6));});});
 map.on('dragstart',function(){if(state.follow){state.follow=false;var fb=document.querySelector('.follow-btn');if(fb){fb.innerHTML='Follow: OFF';fb.classList.remove('active');}}});
 
 var baseCtrl=L.control({position:'topleft'});
-baseCtrl.onAdd=function(){var div=L.DomUtil.create('div','leaflet-bar layer-ctrl');div.innerHTML='<button class="map-btn-base active" data-layer="seabed">Seabed</button><button class="map-btn-base" data-layer="osm">Map</button><button class="map-btn-base" data-layer="satellite">Sat</button><span style="margin:0 4px;color:#5a6a80;font-size:10px">|</span><button class="map-btn-overlay active" data-layer="nautical">Chart</button><button class="map-btn-overlay" data-layer="seamarks">Marks</button><button class="map-btn-overlay" data-layer="bathy">Bathy</button>';L.DomEvent.disableClickPropagation(div);return div;};
+baseCtrl.onAdd=function(){var div=L.DomUtil.create('div','leaflet-bar layer-ctrl');div.innerHTML='<button class="map-btn-base" data-layer="seabed">Seabed</button><button class="map-btn-base active" data-layer="osm">Map</button><button class="map-btn-base" data-layer="satellite">Sat</button><span style="margin:0 4px;color:#5a6a80;font-size:10px">|</span><button class="map-btn-overlay active" data-layer="nautical">Chart</button><button class="map-btn-overlay" data-layer="seamarks">Marks</button><button class="map-btn-overlay" data-layer="bathy">Bathy</button>';L.DomEvent.disableClickPropagation(div);return div;};
 baseCtrl.addTo(map);
 setTimeout(function(){document.querySelectorAll('.map-btn-base').forEach(function(b){b.addEventListener('click',function(){switchBase(this.getAttribute('data-layer'));});});document.querySelectorAll('.map-btn-overlay').forEach(function(b){b.addEventListener('click',function(){toggleOverlay(this.getAttribute('data-layer'));});});},0);
 
