@@ -499,6 +499,50 @@ class TestApiTrack:
 
 
 # ===================================================================
+# Embedded planner route control
+# ===================================================================
+
+
+class TestEmbeddedPlanner:
+    @pytest.mark.asyncio
+    async def test_planner_route_lifecycle(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/planner/path", json={"waypoints": [[0, 0], [10, 0], [10, 10]]})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "planner_route_active"
+            assert data["total_length_m"] == 20.0
+            assert len(data["waypoints"]) == 3
+
+            resp = await ac.get("/api/planner/status")
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is True
+            assert resp.json()["paused"] is False
+
+            resp = await ac.post("/api/planner/pause")
+            assert resp.status_code == 200
+            assert resp.json()["paused"] is True
+
+            resp = await ac.post("/api/planner/resume")
+            assert resp.status_code == 200
+            assert resp.json()["paused"] is False
+
+            resp = await ac.post("/api/planner/clear")
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_planner_rejects_zero_length_route(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/planner/path", json={"waypoints": [[1, 1], [1, 1]]})
+            assert resp.status_code == 400
+
+
+# ===================================================================
 # 32-36.  Demo 3 — Waypoints CRUD
 # ===================================================================
 

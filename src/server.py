@@ -45,6 +45,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
@@ -63,6 +64,8 @@ SIMULATOR_DISABLED = os.environ.get(
 ).lower() in {"1", "true", "yes", "on"}
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+PLANNER_DIST_DIR = _PROJECT_ROOT / "frontend" / "web" / "dist"
+PLANNER_INDEX = PLANNER_DIST_DIR / "index.html"
 
 SENSOR_NAMES = {"accelerometer", "magnetometer", "gyroscope", "orientation", "barometer"}
 
@@ -124,6 +127,10 @@ class RiskSegment(BaseModel):
     heading_error_deg: float
     avg_depth_m: float | None
 
+
+class PlannerPathIn(BaseModel):
+    waypoints: list[list[float]] = Field(..., min_length=2)
+
 # ---------------------------------------------------------------------------
 # Application state
 # ---------------------------------------------------------------------------
@@ -184,6 +191,15 @@ class AppState:
         self.mag_soft_iron: list[list[float]] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
         self.mag_heading: float = 0.0
 
+        # Embedded metric planner route. Planner x is east, y is north, metres.
+        self.planner_path_m: list[tuple[float, float]] = []
+        self.planner_segment_starts_m: list[float] = []
+        self.planner_total_length_m: float = 0.0
+        self.planner_progress_m: float = 0.0
+        self.planner_enabled: bool = False
+        self.planner_paused: bool = False
+        self.planner_done: bool = False
+
 state = AppState()
 
 
@@ -219,6 +235,74 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R, p1, p2 = 6371000.0, math.radians(lat1), math.radians(lat2)
     a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _planner_m_to_latlon(x_m: float, y_m: float) -> tuple[float, float]:
+    """Convert planner metres into local geographic coordinates near Simrishamn."""
+    lat = BASE_LAT + y_m / 111320.0
+    lon = BASE_LON + x_m / (111320.0 * math.cos(math.radians(BASE_LAT)))
+    return lat, lon
+
+
+def _set_planner_path(points: list[tuple[float, float]]) -> None:
+    state.planner_path_m = points
+    state.planner_segment_starts_m = []
+    state.planner_total_length_m = 0.0
+    state.planner_progress_m = 0.0
+    state.planner_enabled = True
+    state.planner_paused = False
+    state.planner_done = False
+
+    acc = 0.0
+    for i, point in enumerate(points):
+        state.planner_segment_starts_m.append(acc)
+        if i + 1 < len(points):
+            nxt = points[i + 1]
+            acc += math.hypot(nxt[0] - point[0], nxt[1] - point[1])
+    state.planner_total_length_m = acc
+
+
+def _clear_planner_path() -> None:
+    state.planner_path_m = []
+    state.planner_segment_starts_m = []
+    state.planner_total_length_m = 0.0
+    state.planner_progress_m = 0.0
+    state.planner_enabled = False
+    state.planner_paused = False
+    state.planner_done = False
+
+
+def _planner_xy_at_progress(progress_m: float) -> tuple[float, float, float]:
+    """Return x, y, heading_deg for the active metric planner route."""
+    path = state.planner_path_m
+    if not path:
+        return 0.0, 0.0, SURVEY_HEADINGS[0]
+    if len(path) == 1:
+        return path[0][0], path[0][1], SURVEY_HEADINGS[0]
+
+    progress_m = max(0.0, min(progress_m, state.planner_total_length_m))
+    segment = max(0, len(path) - 2)
+    for i in range(len(path) - 1):
+        start = state.planner_segment_starts_m[i]
+        end = state.planner_segment_starts_m[i + 1]
+        if progress_m <= end or i == len(path) - 2:
+            segment = i
+            break
+
+    p0, p1 = path[segment], path[segment + 1]
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    seg_len = max(math.hypot(dx, dy), 1e-9)
+    alpha = (progress_m - state.planner_segment_starts_m[segment]) / seg_len
+    alpha = max(0.0, min(alpha, 1.0))
+    heading = math.degrees(math.atan2(dx, dy)) % 360.0
+    return p0[0] + alpha * dx, p0[1] + alpha * dy, heading
+
+
+def _planner_geo_route() -> list[dict[str, float]]:
+    return [
+        {"x_m": x, "y_m": y, "lat": _planner_m_to_latlon(x, y)[0], "lon": _planner_m_to_latlon(x, y)[1]}
+        for x, y in state.planner_path_m
+    ]
 
 
 def _recalc_drift() -> None:
@@ -522,6 +606,71 @@ async def delete_waypoint(wp_id: int):
             return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="Waypoint not found")
 
+
+# ---------------------------------------------------------------------------
+# Embedded planner control API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/planner/path")
+async def set_planner_path(path: PlannerPathIn):
+    points: list[tuple[float, float]] = []
+    for raw in path.waypoints:
+        if len(raw) != 2:
+            raise HTTPException(status_code=400, detail="Planner waypoints must be [x_m, y_m] pairs")
+        x_m, y_m = float(raw[0]), float(raw[1])
+        if not (math.isfinite(x_m) and math.isfinite(y_m)):
+            raise HTTPException(status_code=400, detail="Planner waypoint coordinates must be finite")
+        points.append((x_m, y_m))
+
+    total_length = sum(
+        math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+        for i in range(len(points) - 1)
+    )
+    if total_length <= 0.0:
+        raise HTTPException(status_code=400, detail="Planner route must have non-zero length")
+
+    _set_planner_path(points)
+    return {
+        "status": "planner_route_active",
+        "waypoints": _planner_geo_route(),
+        "total_length_m": round(state.planner_total_length_m, 2),
+    }
+
+
+@app.post("/api/planner/pause")
+async def pause_planner_path():
+    if state.planner_enabled and not state.planner_done:
+        state.planner_paused = True
+    return await planner_status()
+
+
+@app.post("/api/planner/resume")
+async def resume_planner_path():
+    if state.planner_enabled and not state.planner_done:
+        state.planner_paused = False
+    return await planner_status()
+
+
+@app.post("/api/planner/clear")
+async def clear_planner_route():
+    _clear_planner_path()
+    return await planner_status()
+
+
+@app.get("/api/planner/status")
+async def planner_status():
+    x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
+    lat, lon = _planner_m_to_latlon(x_m, y_m)
+    return {
+        "enabled": state.planner_enabled,
+        "paused": state.planner_paused,
+        "done": state.planner_done,
+        "progress_m": round(state.planner_progress_m, 2),
+        "total_length_m": round(state.planner_total_length_m, 2),
+        "position": {"x_m": x_m, "y_m": y_m, "lat": lat, "lon": lon, "heading_deg": round(heading, 1)},
+        "waypoints": _planner_geo_route(),
+    }
+
 # ---------------------------------------------------------------------------
 # Risk assessment API
 # ---------------------------------------------------------------------------
@@ -771,6 +920,67 @@ async def websocket_endpoint(ws: WebSocket):
         state.websockets.discard(ws)
 
 # ---------------------------------------------------------------------------
+# Embedded React planner
+# ---------------------------------------------------------------------------
+
+def _planner_unavailable_response() -> HTMLResponse:
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>React Planner Not Built</title>
+          <style>
+            body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08111f;color:#d0d8e8;font-family:Segoe UI,system-ui,sans-serif}
+            main{max-width:520px;padding:24px;border:1px solid rgba(0,212,170,.18);background:#0f1f38;border-radius:6px}
+            h1{font-size:18px;margin:0 0 10px;color:#00d4aa}
+            p{font-size:13px;line-height:1.5;color:#9fb0c8}
+            code{color:#d0d8e8}
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>React planner is not built</h1>
+            <p>Run <code>cd frontend/web && npm run build</code>, then reload the command center planner.</p>
+          </main>
+        </body>
+        </html>
+        """,
+        status_code=503,
+    )
+
+
+def _serve_planner_file(asset_path: str = ""):
+    if not PLANNER_INDEX.is_file():
+        return _planner_unavailable_response()
+    if not asset_path:
+        return FileResponse(PLANNER_INDEX)
+
+    dist_root = PLANNER_DIST_DIR.resolve()
+    requested = (PLANNER_DIST_DIR / asset_path).resolve()
+    if requested != dist_root and dist_root not in requested.parents:
+        raise HTTPException(status_code=404, detail="Planner asset not found")
+    if requested.is_file():
+        return FileResponse(requested)
+    return FileResponse(PLANNER_INDEX)
+
+
+@app.head("/planner", include_in_schema=False)
+@app.head("/planner/", include_in_schema=False)
+@app.get("/planner", include_in_schema=False)
+@app.get("/planner/", include_in_schema=False)
+async def planner_index():
+    return _serve_planner_file()
+
+
+@app.head("/planner/{asset_path:path}", include_in_schema=False)
+@app.get("/planner/{asset_path:path}", include_in_schema=False)
+async def planner_asset(asset_path: str):
+    return _serve_planner_file(asset_path)
+
+# ---------------------------------------------------------------------------
 # Sensor simulator (background asyncio task)
 # ---------------------------------------------------------------------------
 
@@ -789,8 +999,11 @@ async def _simulator_loop() -> None:
         t = sim_time
         sim_tick += 1
 
-        heading = SURVEY_HEADINGS[phase]
         step_m = SURVEY_SPEED_MS * SIMULATOR_RATE
+        if state.planner_enabled:
+            _, _, heading = _planner_xy_at_progress(state.planner_progress_m)
+        else:
+            heading = SURVEY_HEADINGS[phase]
 
         # ---- IMU sensors ----
         ax = 0.3 * math.sin(0.5 * t) + 0.2 * _smooth_noise(t, 1.0)
@@ -849,24 +1062,35 @@ async def _simulator_loop() -> None:
             "timestamp": _last_ts("barometer"),
         })
 
-        # ---- GPS: slow survey (lawnmower) pattern ----
-        if phase == 0:       # east
-            lon_off += step_m * 1.8e-5
-        elif phase == 1:     # north
-            lat_off += step_m * 9.0e-6
-        elif phase == 2:     # west
-            lon_off -= step_m * 1.8e-5
-        else:                # south
-            lat_off -= step_m * 9.0e-6
+        # ---- GPS: embedded planner route, or fallback slow survey pattern ----
+        if state.planner_enabled:
+            if not state.planner_paused and not state.planner_done:
+                state.planner_progress_m = min(
+                    state.planner_total_length_m,
+                    state.planner_progress_m + step_m,
+                )
+                if state.planner_progress_m >= state.planner_total_length_m:
+                    state.planner_done = True
+            x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
+            lat, lon = _planner_m_to_latlon(x_m, y_m)
+        else:
+            if phase == 0:       # east
+                lon_off += step_m * 1.8e-5
+            elif phase == 1:     # north
+                lat_off += step_m * 9.0e-6
+            elif phase == 2:     # west
+                lon_off -= step_m * 1.8e-5
+            else:                # south
+                lat_off -= step_m * 9.0e-6
 
-        phase_dist += step_m
-        leg_len = SURVEY_LEG_LENGTH if phase in {0, 2} else SURVEY_LEG_SPACING
-        if phase_dist >= leg_len:
-            phase = (phase + 1) % 4
-            phase_dist = 0.0
+            phase_dist += step_m
+            leg_len = SURVEY_LEG_LENGTH if phase in {0, 2} else SURVEY_LEG_SPACING
+            if phase_dist >= leg_len:
+                phase = (phase + 1) % 4
+                phase_dist = 0.0
 
-        lat = BASE_LAT + lat_off + 5e-5 * math.sin(0.1 * t)
-        lon = BASE_LON + lon_off + 5e-5 * math.cos(0.08 * t)
+            lat = BASE_LAT + lat_off + 5e-5 * math.sin(0.1 * t)
+            lon = BASE_LON + lon_off + 5e-5 * math.cos(0.08 * t)
 
         if not state.gps_denied:
             _buffer_sensor("gps", {"lat": round(lat, 6), "lon": round(lon, 6), "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1), "heading_deg": round(heading, 1)})

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-src 'self'; child-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
 <title>Maritime Mission Planner — Demo 5: Command Center</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H">
 <style>
@@ -79,6 +79,16 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .replay-speed.active{background:rgba(0,212,170,0.15);color:#00d4aa;border-color:#00d4aa}
 .export-btn{background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.3);color:#00d4aa;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px;font-family:inherit;transition:all 0.15s;margin-right:6px;margin-bottom:4px}
 .export-btn:hover{background:rgba(0,212,170,0.2);border-color:#00d4aa}
+#planner-drawer{position:absolute;top:48px;left:12px;right:344px;bottom:48px;z-index:25;display:none;flex-direction:column;background:#08111f;border:1px solid rgba(0,212,170,0.24);box-shadow:0 12px 40px rgba(0,0,0,0.45);border-radius:6px;overflow:hidden}
+#planner-drawer.visible{display:flex}
+#planner-header{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:#0f1f38;border-bottom:1px solid rgba(0,212,170,0.16)}
+#planner-header span{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#00d4aa}
+#planner-close{background:transparent;border:1px solid rgba(122,138,160,0.3);color:#d0d8e8;width:26px;height:24px;border-radius:4px;cursor:pointer;font-size:16px;line-height:18px}
+#planner-close:hover{border-color:#00d4aa;color:#00d4aa}
+#planner-frame{width:100%;height:100%;border:0;background:#08111f}
+.planner-launch{width:100%;margin:0 0 6px 0}
+.planner-note{font-size:10px;color:#7a8aa0;line-height:1.35}
+@media(max-width:900px){#planner-drawer{top:42px;left:8px;right:8px;bottom:40px}}
 #gpsdeny-btn.denied{background:rgba(212,64,64,0.2)!important;border-color:#d44040!important;color:#d44040!important;animation:pulse 1.5s infinite}
 #gpsdeny-btn.gps-active{background:rgba(0,212,100,0.15);border-color:#00d46a;color:#00d46a}
 #pos-source.source-dr{color:#f0c040!important}
@@ -162,6 +172,11 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     </div>
   </div>
   <div class="panel">
+    <div class="panel-title">React Planner</div>
+    <button class="export-btn planner-launch" onclick="window.openPlanner()">Open Embedded Planner</button>
+    <div class="planner-note">Metric path planner and uncertainty view. Uses the planner WebSocket backend on port 8080.</div>
+  </div>
+  <div class="panel">
     <div class="panel-title">Mission Risk</div>
     <div style="font-size:28px;font-weight:300" id="risk-score">--</div>
     <div class="risk-bar" id="risk-bar" style="background:#1a3050"></div>
@@ -189,6 +204,14 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 </div>
 
 <div id="replay-badge">REPLAY</div>
+
+<div id="planner-drawer" aria-hidden="true">
+  <div id="planner-header">
+    <span>React Mission Planner</span>
+    <button id="planner-close" type="button" onclick="window.closePlanner()" aria-label="Close planner">&times;</button>
+  </div>
+  <iframe id="planner-frame" title="React mission planner" src="about:blank"></iframe>
+</div>
 
 <div id="status-bar">
   <div id="status-left">MARITIME MISSION PLANNER &mdash; Demo 5: Command Center</div>
@@ -433,6 +456,8 @@ function updateDataSource(){var el=document.getElementById('data-source');var si
 function triggerDownload(url,name){fetch(url).then(function(r){return r.blob();}).then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}).catch(function(){});}
 function exportGeoJSON(){triggerDownload('/api/export/geojson','mission_tracks.geojson');}
 function exportCSV(){triggerDownload('/api/export/csv','mission_data.csv');}
+function openPlanner(){var d=document.getElementById('planner-drawer');var f=document.getElementById('planner-frame');if(!d||!f)return;if(f.getAttribute('src')==='about:blank')f.setAttribute('src','/planner/');d.className='visible';d.setAttribute('aria-hidden','false');}
+function closePlanner(){var d=document.getElementById('planner-drawer');if(!d)return;d.className='';d.setAttribute('aria-hidden','true');}
 
 Object.assign(window,{
   toggleGpsDenial:toggleGpsDenial,
@@ -441,7 +466,9 @@ Object.assign(window,{
   stopReplay:stopReplay,
   setReplaySpeed:setReplaySpeed,
   exportGeoJSON:exportGeoJSON,
-  exportCSV:exportCSV
+  exportCSV:exportCSV,
+  openPlanner:openPlanner,
+  closePlanner:closePlanner
 });
 
 // Tile layers
@@ -490,6 +517,10 @@ var followCtrl=L.control({position:'topleft'});
 followCtrl.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn follow-btn');btn.innerHTML='Follow: OFF';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){state.follow=!state.follow;btn.innerHTML='Follow: '+(state.follow?'ON':'OFF');btn.classList.toggle('active',state.follow);if(state.follow&&vesselMarker)map.panTo(vesselMarker.getLatLng(),{animate:true,duration:0.3});});return btn;};
 followCtrl.addTo(map);
 
+var plannerCtrl=L.control({position:'topleft'});
+plannerCtrl.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn');btn.innerHTML='Planner';btn.title='Open embedded React mission planner';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){openPlanner();});return btn;};
+plannerCtrl.addTo(map);
+
 var wpEditBtn=L.control({position:'topleft'});
 wpEditBtn.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn');btn.innerHTML='+ WP';btn.title='Toggle waypoint placement mode';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){wpMode=!wpMode;btn.classList.toggle('active',wpMode);btn.innerHTML=wpMode?'+ WP ON':'+ WP';map.getContainer().style.cursor=wpMode?'crosshair':'';});return btn;};
 wpEditBtn.addTo(map);
@@ -519,8 +550,9 @@ function checkGpsDenialStatus(){
     if(d.denied){setGpsDeniedState(true);}
   }).catch(function(){});
 }
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closePlanner();});
 // Init
-document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
+document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
 });
 })();
 </script>

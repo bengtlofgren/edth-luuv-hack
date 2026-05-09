@@ -9,12 +9,22 @@ import {
 } from "./types";
 import { useEstimate } from "./ws";
 
+const COMMAND_CENTER_ORIGIN =
+  window.location.port === "5173" ? "http://127.0.0.1:8000" : "";
+
+function sendCommandCenterPlanner(path: string, init: RequestInit = {}) {
+  fetch(`${COMMAND_CENTER_ORIGIN}${path}`, {
+    method: "POST",
+    ...init,
+  }).catch((err) => console.warn("[app] command-center planner sync failed", err));
+}
+
 export function App() {
   const { connected, status, lastTick, send } = useEstimate();
   const [waypoints, setWaypoints] = useState<Vec2[]>([]);
   const [confidence, setConfidence] = useState<ConfidenceLevel>("95");
 
-  const editable = status === "idle";
+  const editable = status === "idle" || status === "done";
 
   const ellipseK = CONFIDENCE_K[confidence];
 
@@ -36,17 +46,27 @@ export function App() {
   const handlePlay = () => {
     console.log("[app] play clicked", { waypoints, status, connected });
     if (waypoints.length < 2) return;
-    send({ type: "set_path", waypoints });
+    if (status !== "paused") {
+      sendCommandCenterPlanner("/api/planner/path", {
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ waypoints }),
+      });
+      send({ type: "set_path", waypoints });
+    } else {
+      sendCommandCenterPlanner("/api/planner/resume");
+    }
     send({ type: "play" });
   };
 
   const handlePause = () => {
     console.log("[app] pause clicked");
+    sendCommandCenterPlanner("/api/planner/pause");
     send({ type: "pause" });
   };
 
   const handleReset = () => {
     console.log("[app] reset clicked");
+    sendCommandCenterPlanner("/api/planner/clear");
     send({ type: "reset" });
     setWaypoints([]);
   };

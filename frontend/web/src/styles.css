@@ -19,12 +19,15 @@ body,
 
 .app {
   display: flex;
-  height: 100vh;
-  width: 100vw;
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .canvas-pane {
-  flex: 1 1 70%;
+  flex: 1 1 auto;
+  min-width: 0;
   background: #0a1320;
   position: relative;
 }

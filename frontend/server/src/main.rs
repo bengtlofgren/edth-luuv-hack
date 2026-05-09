@@ -11,7 +11,7 @@ use tokio::time::interval;
 
 const TICK_HZ: f64 = 20.0;
 const TICK_DT: f64 = 1.0 / TICK_HZ;
-const SPEED: f64 = 5.0;
+const SPEED: f64 = 2.0;
 const COV_GROWTH_DIAG: f64 = 0.5;
 const COV_GROWTH_OFFDIAG: f64 = 0.05;
 const LANDMARK_FIX: f64 = 0.6;

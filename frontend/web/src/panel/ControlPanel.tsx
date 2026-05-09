@@ -36,7 +36,7 @@ export function ControlPanel({
   const canPlay =
     connected &&
     waypointCount >= 2 &&
-    (status === "idle" || status === "paused");
+    (status === "idle" || status === "paused" || status === "done");
   const canPause = connected && status === "running";
 
   return (
@@ -55,10 +55,10 @@ export function ControlPanel({
       <section>
         <h2>Path</h2>
         <div style={{ fontSize: 13 }}>
-          {waypointCount === 0
-            ? "Click on the canvas to add waypoints."
-            : `${waypointCount} waypoint${waypointCount === 1 ? "" : "s"}${
-                status === "idle" ? " (click to add more)" : ""
+            {waypointCount === 0
+              ? "Click on the canvas to add waypoints."
+              : `${waypointCount} waypoint${waypointCount === 1 ? "" : "s"}${
+                status === "idle" || status === "done" ? " (click to add more)" : ""
               }`}
         </div>
       </section>
