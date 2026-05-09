@@ -1,0 +1,11 @@
+[package]
+name = "underwater-mission-planner-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "=1.41.0", features = ["full"] }
+axum = { version = "=0.7.7", features = ["ws"] }
+serde = { version = "=1.0.215", features = ["derive"] }
+serde_json = "=1.0.133"
+futures-util = "=0.3.31"
