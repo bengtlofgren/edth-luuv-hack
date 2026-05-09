@@ -8,8 +8,13 @@ The main entry point is `DvlImuKalmanLayer` in
 1. IMU strapdown propagation from angular velocity and linear acceleration.
 2. Corrected-DVL velocity and optional position measurement updates with an
    error-state Kalman filter.
-3. Output of corrected position, velocity, attitude, gyroscope bias, and
-   accelerometer bias estimates.
+3. Optional magnetometer yaw updates with an in-state magnetic declination
+   estimate.
+4. Output of corrected position, velocity, attitude, gyroscope bias,
+   accelerometer bias, and magnetic declination estimates.
+
+The error state has 16 elements: position (3), velocity (3), attitude error
+(3), gyro bias (3), accel bias (3), and declination (1).
 
 The higher-level `NavigationFusionPipeline` adds the pieces needed around the
 filter for real logs:
@@ -35,11 +40,26 @@ produces an integrated/corrected position or displacement track, pass it as
 ```python
 from dvl_correction import (
     CorrectedDvlMeasurement,
+    CorrectedMagnetometerMeasurement,
     DvlImuKalmanLayer,
     ImuSample,
+    MagnetometerCalibration,
+    MagnetometerCorrectionLayer,
+    RawMagnetometerMeasurement,
 )
 
 layer = DvlImuKalmanLayer()
+mag_correction = MagnetometerCorrectionLayer(
+    calibration=MagnetometerCalibration(expected_field_magnitude_uT=50.0),
+)
+
+corrected_mag = mag_correction.correct(
+    RawMagnetometerMeasurement(
+        timestamp_s=0.0,
+        magnetic_field_body_uT=[25.0, 0.0, -43.3],
+    ),
+    attitude_quat_wxyz=layer.state.attitude_quat_wxyz,
+)
 
 output = layer.process(
     ImuSample(
@@ -52,6 +72,7 @@ output = layer.process(
         velocity_body_m_s=[0.2, 0.0, 0.0],
         position_nav_m=[1.5, 0.0, -0.2],
     ),
+    corrected_magnetometer=corrected_mag,
 )
 
 print(output.position_m)
@@ -59,6 +80,7 @@ print(output.velocity_m_s)
 print(output.attitude_quat_wxyz)
 print(output.gyro_bias_rad_s)
 print(output.accel_bias_m_s2)
+print(output.declination_rad)
 ```
 
 For raw DVL streams, use `NavigationFusionPipeline`:
@@ -140,8 +162,11 @@ Example config file shape:
   },
   "kalman": {
     "gravity_nav_m_s2": [0.0, 0.0, -9.80665],
-    "default_dvl_velocity_std_m_s": 0.05,
-    "default_dvl_position_std_m": 0.25
+    "default_dvl_velocity_std_m_s": 0.20,
+    "default_dvl_position_std_m": 0.25,
+    "default_mag_yaw_std_rad": 0.087,
+    "declination_walk_std_rad_s": 1.0e-6,
+    "initial_declination_std_rad": 0.5
   },
   "dvl_quality": {
     "allowed_modes": ["bottom"],

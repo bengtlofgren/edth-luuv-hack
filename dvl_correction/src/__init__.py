@@ -12,16 +12,24 @@ from .dead_reckoning import DvlDeadReckoningTrack, DvlTrackConfig, DvlTrackState
 from .dvl_correction import DvlCorrectionLayer, DvlQualityConfig, RawDvlMeasurement
 from .dvl_imu_kalman import (
     CorrectedDvlMeasurement,
+    CorrectedMagnetometerMeasurement,
     DvlImuKalmanLayer,
     ImuSample,
     KalmanConfig,
     NavigationOutput,
     NavigationState,
 )
+from .magnetometer import (
+    MagnetometerCalibration,
+    MagnetometerCorrectionLayer,
+    MagnetometerQualityConfig,
+    RawMagnetometerMeasurement,
+)
 from .synchronization import NavigationFusionPipeline, PipelineDiagnostics, SynchronizerConfig
 
 __all__ = [
     "CorrectedDvlMeasurement",
+    "CorrectedMagnetometerMeasurement",
     "DvlCorrectionLayer",
     "DvlDeadReckoningTrack",
     "DvlImuKalmanLayer",
@@ -32,11 +40,15 @@ __all__ = [
     "ImuSample",
     "InitialNavigationConfig",
     "KalmanConfig",
+    "MagnetometerCalibration",
+    "MagnetometerCorrectionLayer",
+    "MagnetometerQualityConfig",
     "NavigationFusionPipeline",
     "NavigationOutput",
     "NavigationState",
     "PipelineDiagnostics",
     "RawDvlMeasurement",
+    "RawMagnetometerMeasurement",
     "SynchronizerConfig",
     "build_navigation_pipeline",
     "build_navigation_pipeline_from_json",
