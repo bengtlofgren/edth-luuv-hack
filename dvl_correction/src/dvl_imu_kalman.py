@@ -1,13 +1,17 @@
 """DVL/IMU error-state Kalman filter layer.
 
-The nominal state is position, velocity, body-to-navigation attitude, and IMU
-biases. The covariance is maintained for a 15 element error state ordered as:
+The nominal state is position, velocity, body-to-navigation attitude, IMU
+biases, and magnetic declination. The covariance is maintained for a 16
+element error state ordered as:
 
-    position, velocity, attitude error, gyro bias, accelerometer bias
+    position, velocity, attitude error, gyro bias, accelerometer bias, declination
 
 DVL measurements are assumed to be corrected before they are passed to this
 layer. Velocity is expressed in the IMU/body frame. Position is expressed in the
 navigation frame and can come from an integrated/corrected DVL track estimate.
+Magnetometer measurements are corrected to a magnetic-frame yaw with an
+associated standard deviation; the filter combines this with its declination
+estimate to update true heading.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ class NavigationState:
     attitude_quat_wxyz: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0]))
     gyro_bias_rad_s: np.ndarray = field(default_factory=lambda: np.zeros(3))
     accel_bias_m_s2: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    declination_rad: float = 0.0
 
     def copy(self) -> "NavigationState":
         return NavigationState(
@@ -63,7 +68,17 @@ class NavigationState:
             attitude_quat_wxyz=self.attitude_quat_wxyz.copy(),
             gyro_bias_rad_s=self.gyro_bias_rad_s.copy(),
             accel_bias_m_s2=self.accel_bias_m_s2.copy(),
+            declination_rad=float(self.declination_rad),
         )
+
+
+@dataclass(frozen=True)
+class CorrectedMagnetometerMeasurement:
+    """Corrected magnetometer measurement reduced to a magnetic-frame yaw."""
+
+    timestamp_s: float
+    yaw_magnetic_rad: float
+    yaw_std_rad: float | None = None
 
 
 @dataclass(frozen=True)
@@ -76,8 +91,10 @@ class NavigationOutput:
     attitude_quat_wxyz: np.ndarray
     gyro_bias_rad_s: np.ndarray
     accel_bias_m_s2: np.ndarray
+    declination_rad: float
     covariance: np.ndarray
     dvl_update_applied: bool
+    magnetometer_update_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,13 +106,16 @@ class KalmanConfig:
     accel_noise_std_m_s2: float = 0.1
     gyro_bias_walk_std_rad_s2: float = 1.0e-5
     accel_bias_walk_std_m_s3: float = 1.0e-4
-    default_dvl_velocity_std_m_s: float = 0.05
+    declination_walk_std_rad_s: float = 1.0e-6
+    default_dvl_velocity_std_m_s: float = 0.20
     default_dvl_position_std_m: float = 0.25
+    default_mag_yaw_std_rad: float = 0.087
     initial_position_std_m: float = 1.0
     initial_velocity_std_m_s: float = 1.0
     initial_attitude_std_rad: float = 0.1
     initial_gyro_bias_std_rad_s: float = 0.01
     initial_accel_bias_std_m_s2: float = 0.1
+    initial_declination_std_rad: float = 0.5
     mahalanobis_gate: float | None = 16.27
 
 
@@ -112,7 +132,7 @@ class DvlImuKalmanLayer:
         self.state = (initial_state or NavigationState()).copy()
         self.state.attitude_quat_wxyz = _normalize_quat(self.state.attitude_quat_wxyz)
         self.covariance = (
-            _initial_covariance(self.config) if initial_covariance is None else _as_covariance(initial_covariance, 15)
+            _initial_covariance(self.config) if initial_covariance is None else _as_covariance(initial_covariance, 16)
         )
         self._last_timestamp_s: float | None = None
 
@@ -120,14 +140,22 @@ class DvlImuKalmanLayer:
         self,
         imu_sample: ImuSample,
         corrected_dvl: CorrectedDvlMeasurement | None = None,
+        corrected_magnetometer: CorrectedMagnetometerMeasurement | None = None,
     ) -> NavigationOutput:
-        """Propagate with IMU data and update with a corrected DVL measurement."""
+        """Propagate with IMU data and update with corrected DVL/magnetometer measurements."""
 
         self.propagate_imu(imu_sample)
         dvl_update_applied = False
         if corrected_dvl is not None:
             dvl_update_applied = self.update_corrected_dvl(corrected_dvl)
-        return self.output(imu_sample.timestamp_s, dvl_update_applied=dvl_update_applied)
+        magnetometer_update_applied = False
+        if corrected_magnetometer is not None:
+            magnetometer_update_applied = self.update_magnetometer_yaw(corrected_magnetometer)
+        return self.output(
+            imu_sample.timestamp_s,
+            dvl_update_applied=dvl_update_applied,
+            magnetometer_update_applied=magnetometer_update_applied,
+        )
 
     @property
     def last_timestamp_s(self) -> float | None:
@@ -195,7 +223,7 @@ class DvlImuKalmanLayer:
         predicted_velocity_body = rotation_body_to_nav.T @ self.state.velocity_m_s
         residual = velocity_body - predicted_velocity_body
 
-        h_matrix = np.zeros((3, 15))
+        h_matrix = np.zeros((3, 16))
         h_matrix[:, 3:6] = rotation_body_to_nav.T
         h_matrix[:, 6:9] = rotation_body_to_nav.T @ _skew(self.state.velocity_m_s)
 
@@ -211,8 +239,38 @@ class DvlImuKalmanLayer:
         measurement_covariance = _position_measurement_covariance(measurement, self.config)
         residual = position_nav - self.state.position_m
 
-        h_matrix = np.zeros((3, 15))
+        h_matrix = np.zeros((3, 16))
         h_matrix[:, 0:3] = np.eye(3)
+
+        return self._apply_measurement_update(residual, h_matrix, measurement_covariance)
+
+    def update_magnetometer_yaw(self, measurement: CorrectedMagnetometerMeasurement) -> bool:
+        """Apply a magnetometer-derived magnetic-frame yaw update.
+
+        The measurement reports yaw in the magnetic frame. The filter
+        predicts the magnetic yaw as ``yaw_true - declination`` using its
+        current attitude and declination estimate. Both the yaw component of
+        the attitude error (in the navigation frame) and the declination
+        state observe the residual.
+        """
+
+        yaw_magnetic_meas = float(measurement.yaw_magnetic_rad)
+        yaw_std = (
+            float(measurement.yaw_std_rad)
+            if measurement.yaw_std_rad is not None
+            else float(self.config.default_mag_yaw_std_rad)
+        )
+        if yaw_std <= 0.0:
+            raise ValueError("yaw_std_rad must be positive")
+        measurement_covariance = np.array([[yaw_std * yaw_std]])
+
+        yaw_predicted = _yaw_from_quaternion(self.state.attitude_quat_wxyz)
+        predicted_yaw_magnetic = yaw_predicted - float(self.state.declination_rad)
+        residual = np.array([_wrap_to_pi(yaw_magnetic_meas - predicted_yaw_magnetic)])
+
+        h_matrix = np.zeros((1, 16))
+        h_matrix[0, 8] = 1.0
+        h_matrix[0, 15] = -1.0
 
         return self._apply_measurement_update(residual, h_matrix, measurement_covariance)
 
@@ -232,7 +290,7 @@ class DvlImuKalmanLayer:
         error_state = kalman_gain @ residual
         self._apply_error_state(error_state)
 
-        identity = np.eye(15)
+        identity = np.eye(16)
         residual_projector = identity - kalman_gain @ h_matrix
         self.covariance = (
             residual_projector @ self.covariance @ residual_projector.T
@@ -241,7 +299,12 @@ class DvlImuKalmanLayer:
         self.covariance = _symmetrize(self.covariance)
         return True
 
-    def output(self, timestamp_s: float, dvl_update_applied: bool = False) -> NavigationOutput:
+    def output(
+        self,
+        timestamp_s: float,
+        dvl_update_applied: bool = False,
+        magnetometer_update_applied: bool = False,
+    ) -> NavigationOutput:
         """Return a copy of the current navigation estimate."""
 
         return NavigationOutput(
@@ -251,8 +314,10 @@ class DvlImuKalmanLayer:
             attitude_quat_wxyz=self.state.attitude_quat_wxyz.copy(),
             gyro_bias_rad_s=self.state.gyro_bias_rad_s.copy(),
             accel_bias_m_s2=self.state.accel_bias_m_s2.copy(),
+            declination_rad=float(self.state.declination_rad),
             covariance=self.covariance.copy(),
             dvl_update_applied=dvl_update_applied,
+            magnetometer_update_applied=magnetometer_update_applied,
         )
 
     def reset(
@@ -264,7 +329,7 @@ class DvlImuKalmanLayer:
 
         self.state = (state or NavigationState()).copy()
         self.state.attitude_quat_wxyz = _normalize_quat(self.state.attitude_quat_wxyz)
-        self.covariance = _initial_covariance(self.config) if covariance is None else _as_covariance(covariance, 15)
+        self.covariance = _initial_covariance(self.config) if covariance is None else _as_covariance(covariance, 16)
         self._last_timestamp_s = None
 
     def _propagate_covariance(
@@ -273,8 +338,8 @@ class DvlImuKalmanLayer:
         rotation_body_to_nav: np.ndarray,
         specific_force_body: np.ndarray,
     ) -> None:
-        transition = np.eye(15)
-        dynamics = np.zeros((15, 15))
+        transition = np.eye(16)
+        dynamics = np.zeros((16, 16))
 
         dynamics[0:3, 3:6] = np.eye(3)
         dynamics[3:6, 6:9] = -_skew(rotation_body_to_nav @ specific_force_body)
@@ -283,7 +348,7 @@ class DvlImuKalmanLayer:
 
         transition += dynamics * dt
 
-        process_noise = np.zeros((15, 15))
+        process_noise = np.zeros((16, 16))
         process_noise[3:6, 3:6] = (
             self.config.accel_noise_std_m_s2 * self.config.accel_noise_std_m_s2 * dt * np.eye(3)
         )
@@ -302,6 +367,11 @@ class DvlImuKalmanLayer:
             * dt
             * np.eye(3)
         )
+        process_noise[15, 15] = (
+            self.config.declination_walk_std_rad_s
+            * self.config.declination_walk_std_rad_s
+            * dt
+        )
 
         self.covariance = transition @ self.covariance @ transition.T + process_noise
         self.covariance = _symmetrize(self.covariance)
@@ -314,6 +384,7 @@ class DvlImuKalmanLayer:
         )
         self.state.gyro_bias_rad_s = self.state.gyro_bias_rad_s + error_state[9:12]
         self.state.accel_bias_m_s2 = self.state.accel_bias_m_s2 + error_state[12:15]
+        self.state.declination_rad = float(self.state.declination_rad + error_state[15])
 
 
 def _initial_covariance(config: KalmanConfig) -> np.ndarray:
@@ -324,6 +395,7 @@ def _initial_covariance(config: KalmanConfig) -> np.ndarray:
             *(config.initial_attitude_std_rad * config.initial_attitude_std_rad for _ in range(3)),
             *(config.initial_gyro_bias_std_rad_s * config.initial_gyro_bias_std_rad_s for _ in range(3)),
             *(config.initial_accel_bias_std_m_s2 * config.initial_accel_bias_std_m_s2 for _ in range(3)),
+            config.initial_declination_std_rad * config.initial_declination_std_rad,
         ]
     )
     return np.diag(variances)
@@ -420,3 +492,16 @@ def _skew(vector: np.ndarray) -> np.ndarray:
 
 def _symmetrize(matrix: np.ndarray) -> np.ndarray:
     return 0.5 * (matrix + matrix.T)
+
+
+def _yaw_from_quaternion(quaternion: np.ndarray) -> float:
+    """Extract the navigation-frame yaw (rotation about Z) from a quaternion."""
+
+    w, x, y, z = _normalize_quat(quaternion)
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
+def _wrap_to_pi(angle_rad: float) -> float:
+    """Wrap an angle in radians to the (-pi, pi] interval."""
+
+    return float((angle_rad + np.pi) % (2.0 * np.pi) - np.pi)

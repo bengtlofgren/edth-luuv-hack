@@ -1,0 +1,148 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  color: #e6e6e6;
+  background: #0c1622;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.canvas-pane {
+  flex: 1 1 70%;
+  background: #0a1320;
+  position: relative;
+}
+
+.panel {
+  flex: 0 0 320px;
+  border-left: 1px solid #1d2a3d;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.panel h2 {
+  margin: 0 0 4px 0;
+  font-size: 16px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7fb3d5;
+}
+
+.panel section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  flex: 1;
+  padding: 8px 12px;
+  background: #1b2a3f;
+  color: #e6e6e6;
+  border: 1px solid #2a3d57;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.btn:hover:not(:disabled) {
+  background: #233650;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: #1b6ca8;
+  border-color: #2389d0;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2389d0;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+
+.status-dot.connected {
+  background: #4caf50;
+}
+
+.status-dot.disconnected {
+  background: #e53935;
+}
+
+.bar {
+  height: 14px;
+  background: #16243a;
+  border: 1px solid #2a3d57;
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4caf50 0%, #ffb300 60%, #e53935 100%);
+  transition: width 80ms linear;
+}
+
+.bar-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #9fb6cf;
+  margin-bottom: 2px;
+}
+
+.readout {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  background: #0a1320;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid #1d2a3d;
+  color: #b0c4dc;
+  white-space: pre;
+}
+
+.radio-row {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.radio-row label {
+  cursor: pointer;
+}

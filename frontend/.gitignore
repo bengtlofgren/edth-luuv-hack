@@ -1,0 +1,15 @@
+# Rust
+/server/target/
+**/*.rs.bk
+
+# Node / Vite
+/web/node_modules/
+/web/dist/
+/web/*.tsbuildinfo
+/web/vite.config.js
+/web/vite.config.d.ts
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
