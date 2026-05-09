@@ -1128,6 +1128,29 @@ class TestGpsDenial:
             resp = await ac.get("/api/track")
             assert resp.json()["properties"]["count"] == initial_count
 
+    @pytest.mark.asyncio
+    async def test_documented_gps_denial_api(self, monkeypatch):
+        """POST/GET /api/gps-denial mirror the documented contract."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0})
+
+            resp = await ac.post("/api/gps-denial", json={"enabled": True})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["gps_denied"] is True
+            assert data["last_gps"]["lat"] == pytest.approx(56.16)
+            assert data["simulator_gps_stopped"] is True
+
+            resp = await ac.get("/api/gps-denial")
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is True
+
+            resp = await ac.post("/api/gps-denial", json={"enabled": False})
+            assert resp.status_code == 200
+            assert resp.json()["gps_denied"] is False
+
 
 # ===================================================================
 # 59-62.  Dead Reckoning
@@ -1226,6 +1249,28 @@ class TestDeadReckoning:
         assert isinstance(ellipse["semi_minor"], float)
         assert isinstance(ellipse["angle_deg"], float)
 
+    @pytest.mark.asyncio
+    async def test_documented_dead_reckon_api(self, monkeypatch):
+        """Documented POST/status dead-reckon endpoints return useful fields."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0})
+            await ac.post("/api/gps-denial", json={"enabled": True})
+
+            resp = await ac.post("/api/dead-reckon", json={})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["lat"] is not None
+            assert data["fix_type"] == "dead_reckon"
+            assert "semi_major_m" in data["ellipse"]
+
+            resp = await ac.get("/api/dead-reckon/status")
+            assert resp.status_code == 200
+            status = resp.json()
+            assert status["gps_denied"] is True
+            assert status["estimated_position"]["lat"] is not None
+
 
 # ===================================================================
 # 63-65.  Magnetometer
@@ -1287,6 +1332,33 @@ class TestMagnetometer:
                 assert 0 <= mag_heading <= 360.0, (
                     f"mag_heading {mag_heading} out of range for x={x}, y={y}"
                 )
+
+    @pytest.mark.asyncio
+    async def test_estimation_tools_are_wired(self, monkeypatch):
+        """Server calls the real DVL/IMU and magnetometer package APIs."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post(
+                "/data",
+                json={
+                    "payload": [
+                        {"name": "accelerometer", "values": {"x": 0.0, "y": 0.0, "z": 9.81}},
+                        {"name": "gyroscope", "values": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                    ]
+                },
+            )
+            assert src.server.state.kf_output is not None
+
+            await ac.post(
+                "/data",
+                json={"payload": [{"name": "magnetometer", "values": {"x": 50.0, "y": 0.0, "z": 0.0}}]},
+            )
+            assert src.server.state.mag_heading == pytest.approx(90.0)
+
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0})
+            assert src.server.state.kf_output is not None
+            assert len(src.server.state.kf_covariance) == 2
 
 
 # ===================================================================

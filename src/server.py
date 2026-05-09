@@ -23,17 +23,14 @@ except ImportError:
     from bathymetry import get_depth, grid_info  # fallback for pytest from src/
 
 # Teammate estimation tools
-from dvl_correction.src.magnetometer import (
-    MagnetometerCalibration,
-    MagnetometerCorrectionLayer,
-    MagnetometerQualityConfig,
-    RawMagnetometerMeasurement,
-)
-from dvl_correction.src.dvl_imu_kalman import (
+from dvl_correction import (
+    CorrectedDvlMeasurement,
     DvlImuKalmanLayer,
     ImuSample,
     KalmanConfig,
+    MagnetometerCorrectionLayer,
     NavigationOutput,
+    RawMagnetometerMeasurement,
 )
 
 from src.replay import SimrisReplay
@@ -47,6 +44,7 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+import numpy as np
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -108,6 +106,10 @@ class GpsData(BaseModel):
 class PressureData(BaseModel):
     depth_m: float | None = None
     pressure_bar: float | None = None
+
+
+class GpsDenialIn(BaseModel):
+    enabled: bool
 
 
 class WaypointIn(BaseModel):
@@ -179,6 +181,10 @@ class AppState:
         self.mag_correction: MagnetometerCorrectionLayer = MagnetometerCorrectionLayer()
         self.kf_output: NavigationOutput | None = None
         self.kf_covariance: list[list[float]] = [[1.0, 0.0], [0.0, 1.0]]
+        self.nav_origin_lat: float | None = None
+        self.nav_origin_lon: float | None = None
+        self.latest_accel_m_s2: list[float] | None = None
+        self.latest_gyro_rad_s: list[float] | None = None
 
         # Real data replay
         self.replay: SimrisReplay = SimrisReplay()
@@ -235,6 +241,28 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R, p1, p2 = 6371000.0, math.radians(lat1), math.radians(lat2)
     a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dlon)
+    return math.degrees(math.atan2(y, x)) % 360.0
+
+
+def _ensure_nav_origin(lat: float, lon: float) -> None:
+    if state.nav_origin_lat is None or state.nav_origin_lon is None:
+        state.nav_origin_lat = lat
+        state.nav_origin_lon = lon
+
+
+def _latlon_to_nav_m(lat: float, lon: float) -> np.ndarray:
+    _ensure_nav_origin(lat, lon)
+    assert state.nav_origin_lat is not None and state.nav_origin_lon is not None
+    north_m = (lat - state.nav_origin_lat) * 111320.0
+    east_m = (lon - state.nav_origin_lon) * 111320.0 * math.cos(math.radians(state.nav_origin_lat))
+    return np.array([east_m, north_m, 0.0], dtype=float)
 
 
 def _planner_m_to_latlon(x_m: float, y_m: float) -> tuple[float, float]:
@@ -321,6 +349,149 @@ def _recalc_drift() -> None:
     """Recalculate drift rate from current gyro bias and accelerometer noise."""
     nf = 1.0 + (math.sqrt(state.accel_variance) / 9.81 if state.accel_variance > 0 else 0)
     state.drift_rate_dps = abs(state.gyro_z_bias) * (180.0 / math.pi) * nf
+
+
+def _remember_kf_output(output: NavigationOutput) -> None:
+    state.kf_output = output
+    state.kf_covariance = output.covariance[:2, :2].tolist()
+
+
+def _maybe_process_imu(timestamp_s: float) -> None:
+    if state.latest_accel_m_s2 is None or state.latest_gyro_rad_s is None:
+        return
+    if state.kf.last_timestamp_s is not None and timestamp_s <= state.kf.last_timestamp_s:
+        return
+    output = state.kf.process(
+        ImuSample(
+            timestamp_s=timestamp_s,
+            angular_velocity_rad_s=state.latest_gyro_rad_s,
+            linear_acceleration_m_s2=state.latest_accel_m_s2,
+        )
+    )
+    _remember_kf_output(output)
+
+
+def _apply_magnetometer(values: dict[str, float], timestamp_s: float) -> None:
+    raw = RawMagnetometerMeasurement(
+        timestamp_s=timestamp_s,
+        magnetic_field_body_uT=[
+            values.get("x", 0.0),
+            values.get("y", 0.0),
+            values.get("z", 0.0),
+        ],
+    )
+    corrected = state.mag_correction.correct(
+        raw,
+        attitude_quat_wxyz=state.kf.state.attitude_quat_wxyz,
+    )
+    if corrected is None:
+        return
+    state.mag_heading = math.degrees(corrected.yaw_magnetic_rad) % 360.0
+    state.dr_heading = state.mag_heading
+    applied = state.kf.update_magnetometer_yaw(corrected)
+    _remember_kf_output(state.kf.output(timestamp_s, magnetometer_update_applied=applied))
+
+
+def _latest_gps() -> dict[str, Any] | None:
+    gps_buf = state.buffers.get("gps")
+    return gps_buf[-1] if gps_buf else None
+
+
+def _gps_age_sec(now: float | None = None) -> float | None:
+    last_gps = _latest_gps()
+    if not last_gps or "timestamp" not in last_gps:
+        return None
+    return max(0.0, (now or _now()) - last_gps["timestamp"])
+
+
+def _gps_denial_summary() -> dict[str, Any]:
+    age = _gps_age_sec()
+    last_gps = _latest_gps()
+    return {
+        "enabled": state.gps_denied,
+        "gps_denied": state.gps_denied,
+        "last_gps": None if last_gps is None else {
+            "lat": last_gps.get("lat"),
+            "lon": last_gps.get("lon"),
+            "age_sec": round(age or 0.0, 1),
+        },
+        "simulator_gps_stopped": state.gps_denied,
+    }
+
+
+def _enable_gps_denial() -> None:
+    if not state.gps_denied:
+        state.gps_deny_start_time = _now()
+    state.gps_denied = True
+    last = _latest_gps()
+    if last:
+        state.dr_lat = last.get("lat")
+        state.dr_lon = last.get("lon")
+        state.dr_last_gps_speed_kn = last.get("speed_kn") or (SURVEY_SPEED_MS * 1.94384)
+        state.dr_heading = last.get("heading_deg") if last.get("heading_deg") is not None else state.mag_heading
+    else:
+        state.dr_last_gps_speed_kn = SURVEY_SPEED_MS * 1.94384
+        state.dr_heading = state.mag_heading
+
+
+def _disable_gps_denial() -> None:
+    state.gps_denied = False
+    state.gps_deny_start_time = None
+
+
+def _dead_reckon_payload() -> dict[str, Any]:
+    now = _now()
+    last_gps = _latest_gps()
+    secs = (now - state.gps_deny_start_time) if state.gps_denied and state.gps_deny_start_time else 0.0
+    speed_kn = state.dr_last_gps_speed_kn or (last_gps.get("speed_kn", 0.0) if last_gps else 0.0)
+    uncertainty_m = max(0.0, speed_kn * 0.514444 * secs * state.drift_rate_dps * 0.1)
+    heading = state.dr_heading
+    hr = math.radians(heading)
+    c, s = math.cos(hr), math.sin(hr)
+    lm, ln = (uncertainty_m * 1.5) ** 2, (uncertainty_m * 0.3) ** 2
+    cov_ee = lm * c * c + ln * s * s
+    cov_nn = lm * s * s + ln * c * c
+    cov_en = (lm - ln) * s * c
+    lat = state.dr_lat if state.gps_denied else (last_gps.get("lat") if last_gps else state.dr_lat)
+    lon = state.dr_lon if state.gps_denied else (last_gps.get("lon") if last_gps else state.dr_lon)
+    fix_type = "dead_reckon" if state.gps_denied else "gps"
+    ellipse = {
+        "semi_major_m": round(uncertainty_m * 1.5, 1),
+        "semi_minor_m": round(uncertainty_m * 0.3, 1),
+        "orientation_deg": round(heading, 1),
+    }
+    covariance = [[round(cov_nn, 4), round(cov_en, 4)], [round(cov_en, 4), round(cov_ee, 4)]]
+    return {
+        "type": "dead_reckon",
+        "lat": lat,
+        "lon": lon,
+        "dr_lat": lat,
+        "dr_lon": lon,
+        "gps_lat": last_gps.get("lat") if last_gps else None,
+        "gps_lon": last_gps.get("lon") if last_gps else None,
+        "gps_age_sec": round(secs, 1),
+        "seconds_since_gps": round(secs, 1),
+        "fix_type": fix_type,
+        "heading_source": "magnetometer",
+        "uncertainty_m": round(uncertainty_m, 1),
+        "ellipse": ellipse,
+        "uncertainty_ellipse": {
+            "semi_major": ellipse["semi_major_m"],
+            "semi_minor": ellipse["semi_minor_m"],
+            "angle_deg": ellipse["orientation_deg"],
+        },
+        "position_source": fix_type,
+        "estimated_position": {"lat": lat, "lon": lon},
+        "mean": [lat, lon],
+        "cov": covariance,
+        "covariance": covariance,
+        "drift_stats": {
+            "gyro_bias_dps": round(state.gyro_z_bias * (180.0 / math.pi), 4),
+            "arw_deg_per_sqrt_s": 0.0,
+            "total_drift_deg": round(state.drift_rate_dps * secs, 4),
+            "position_uncertainty_m": round(uncertainty_m, 1),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +584,21 @@ async def post_data(data: DataPayload):
             **sensor.values,
             "timestamp": _last_ts(sensor.name),
         })
+        timestamp_s = _last_ts(sensor.name)
+        if sensor.name == "accelerometer":
+            state.latest_accel_m_s2 = [
+                sensor.values.get("x", 0.0),
+                sensor.values.get("y", 0.0),
+                sensor.values.get("z", 0.0),
+            ]
+            _maybe_process_imu(timestamp_s)
+        if sensor.name == "gyroscope":
+            state.latest_gyro_rad_s = [
+                sensor.values.get("x", 0.0),
+                sensor.values.get("y", 0.0),
+                sensor.values.get("z", 0.0),
+            ]
+            _maybe_process_imu(timestamp_s)
         if sensor.name == "gyroscope" and "z" in sensor.values:
             z = sensor.values["z"]
             if math.isfinite(z):
@@ -428,64 +614,55 @@ async def post_data(data: DataPayload):
                     state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
                 _recalc_drift()
         if sensor.name == "magnetometer":
-            # Use teammate MagnetometerCorrectionLayer for proper calibration
-            try:
-                raw = RawMagnetometerMeasurement(
-                    x=sensor.values.get("x", 0.0),
-                    y=sensor.values.get("y", 0.0),
-                    z=sensor.values.get("z", 0.0),
-                )
-                corrected = state.mag_correction.correct(raw, roll=0.0, pitch=0.0)
-                if corrected is not None:
-                    state.mag_heading = math.degrees(corrected.yaw) % 360.0
-                    state.dr_heading = state.mag_heading
-            except Exception:
-                pass
+            _apply_magnetometer(sensor.values, timestamp_s)
     return {"status": "ok"}
 
 @app.post("/gps")
 async def post_gps(data: GpsData):
     """Ingest a GPS position fix."""
+    if state.gps_denied:
+        return {"status": "ok", "gps_denied": True}
+
+    prev_gps = _latest_gps()
     entry: dict[str, Any] = {"lat": data.lat, "lon": data.lon}
-    if data.speed_kn is not None:
-        entry["speed_kn"] = data.speed_kn
-    if data.heading_deg is not None:
-        entry["heading_deg"] = data.heading_deg
+    speed_kn = data.speed_kn
+    heading_deg = data.heading_deg
+    if prev_gps and speed_kn is None:
+        dt = max(_now() - prev_gps.get("timestamp", _now()), 1.0e-3)
+        dist_m = _haversine(prev_gps["lat"], prev_gps["lon"], data.lat, data.lon)
+        speed_kn = (dist_m / dt) * 1.94384
+    if prev_gps and heading_deg is None:
+        heading_deg = _bearing_deg(prev_gps["lat"], prev_gps["lon"], data.lat, data.lon)
+    if speed_kn is not None:
+        entry["speed_kn"] = speed_kn
+    if heading_deg is not None:
+        entry["heading_deg"] = heading_deg
     _buffer_sensor("gps", entry)
-    # Kalman GPS correction using teammate DvlImuKalmanLayer
-    try:
-        import numpy as np
-        from dvl_correction.src.dvl_imu_kalman import CorrectedDvlMeasurement
-        dvl = CorrectedDvlMeasurement(
-            position=np.array([data.lat, data.lon, 0.0]),
-            velocity=np.array([0.0, 0.0, 0.0]),
-            position_covariance=np.diag([4.0, 4.0, 0.01]),
-            velocity_covariance=np.diag([0.5, 0.5, 0.5]),
-            beams_valid=4, status=0,
+    timestamp_s = _last_ts("gps")
+    dvl_update_applied = state.kf.update_corrected_dvl(
+        CorrectedDvlMeasurement(
+            timestamp_s=timestamp_s,
+            position_nav_m=_latlon_to_nav_m(data.lat, data.lon),
+            position_covariance_nav=np.diag([4.0, 4.0, 0.01]),
         )
-        state.kf.correct(dvl)
-        out = state.kf.output()
-        if out:
-            state.kf_output = out
-            state.kf_covariance = out.position_covariance[:2, :2].tolist()
-    except Exception:
-        pass
+    )
+    _remember_kf_output(state.kf.output(timestamp_s, dvl_update_applied=dvl_update_applied))
 
     if not state.gps_denied:
         await _broadcast({
             "type": "gps",
             "lat": data.lat,
             "lon": data.lon,
-            "speed_kn": data.speed_kn,
-            "heading_deg": data.heading_deg,
+            "speed_kn": speed_kn,
+            "heading_deg": heading_deg,
             "timestamp": _last_ts("gps"),
         })
         state.track_buffer.append({
             "lat": data.lat,
             "lon": data.lon,
             "timestamp": _now(),
-            "speed_kn": data.speed_kn,
-            "heading_deg": data.heading_deg,
+            "speed_kn": speed_kn,
+            "heading_deg": heading_deg,
         })
         state.last_gps_time = _now()
     return {"status": "ok"}
@@ -855,21 +1032,12 @@ async def replay_speed(multiplier: float = 1.0):
 
 @app.get("/api/gps-deny/on")
 async def gps_deny_on():
-    state.gps_denied = True
-    state.gps_deny_start_time = _now()
-    gps_buf = state.buffers.get("gps")
-    if gps_buf:
-        last = gps_buf[-1]
-        state.dr_lat = last.get("lat")
-        state.dr_lon = last.get("lon")
-        state.dr_last_gps_speed_kn = last.get("speed_kn", 0.0)
-    state.dr_heading = state.mag_heading
+    _enable_gps_denial()
     return {"status": "gps_denied"}
 
 @app.get("/api/gps-deny/off")
 async def gps_deny_off():
-    state.gps_denied = False
-    state.gps_deny_start_time = None
+    _disable_gps_denial()
     return {"status": "gps_restored"}
 
 @app.get("/api/gps-deny/status")
@@ -877,37 +1045,36 @@ async def gps_deny_status():
     secs = (_now() - state.gps_deny_start_time) if state.gps_denied else 0.0
     return {"denied": state.gps_denied, "seconds_without_gps": round(secs, 1)}
 
+@app.post("/api/gps-denial")
+async def set_gps_denial(payload: GpsDenialIn):
+    if payload.enabled:
+        _enable_gps_denial()
+    else:
+        _disable_gps_denial()
+    return _gps_denial_summary()
+
+@app.get("/api/gps-denial")
+async def get_gps_denial():
+    return _gps_denial_summary()
+
 @app.get("/api/dead-reckon")
 async def get_dead_reckon():
-    now = _now()
-    gps_buf = state.buffers.get("gps")
-    last_gps = gps_buf[-1] if gps_buf else None
-    secs = (now - state.gps_deny_start_time) if state.gps_denied else 0.0
-    speed_kn = state.dr_last_gps_speed_kn or (last_gps.get("speed_kn", 0.0) if last_gps else 0.0)
-    uncertainty_m = speed_kn * 0.514 * secs * state.drift_rate_dps * 0.1
-    heading = state.dr_heading
-    hr = math.radians(heading)
-    c, s = math.cos(hr), math.sin(hr)
-    lm, ln = (uncertainty_m * 1.5) ** 2, (uncertainty_m * 0.3) ** 2
-    cov_ee = lm * c * c + ln * s * s
-    cov_nn = lm * s * s + ln * c * c
-    cov_en = (lm - ln) * s * c
+    return _dead_reckon_payload()
+
+@app.post("/api/dead-reckon")
+async def post_dead_reckon():
+    return _dead_reckon_payload()
+
+@app.get("/api/dead-reckon/status")
+async def dead_reckon_status():
+    payload = _dead_reckon_payload()
     return {
-        "dr_lat": state.dr_lat,
-        "dr_lon": state.dr_lon,
-        "gps_lat": last_gps.get("lat") if last_gps else None,
-        "gps_lon": last_gps.get("lon") if last_gps else None,
-        "heading_source": "magnetometer",
-        "uncertainty_m": round(uncertainty_m, 1),
-        "uncertainty_ellipse": {
-            "semi_major": round(uncertainty_m * 1.5, 1),
-            "semi_minor": round(uncertainty_m * 0.3, 1),
-            "angle_deg": round(heading, 1),
-        },
-        "seconds_since_gps": round(secs, 1),
-        "position_source": "dead_reckon" if state.gps_denied else "gps",
-        "mean": [state.dr_lat, state.dr_lon],
-        "cov": [[round(cov_nn, 4), round(cov_en, 4)], [round(cov_en, 4), round(cov_ee, 4)]],
+        "gps_denied": state.gps_denied,
+        "gps_age_sec": payload["gps_age_sec"],
+        "fix_type": payload["fix_type"],
+        "estimated_position": payload["estimated_position"],
+        "drift": payload["drift_stats"],
+        "ellipse": payload["ellipse"],
     }
 
 
@@ -1125,21 +1292,7 @@ async def _simulator_loop() -> None:
 
         # ---- Dead reckon WS (1 Hz during denial) ----
         if state.gps_denied and state.dr_lat is not None and sim_tick % 20 == 0:
-            gps_age = _now() - state.gps_deny_start_time if state.gps_deny_start_time else 0.0
-            spd = state.dr_last_gps_speed_kn or SURVEY_SPEED_MS * 1.94384
-            unc = spd * 0.514 * gps_age * state.drift_rate_dps * 0.1
-            hdg, hr = state.dr_heading, math.radians(state.dr_heading)
-            lm, ln = (unc * 1.5) ** 2, (unc * 0.3) ** 2
-            c, s = math.cos(hr), math.sin(hr)
-            cv = [[round(lm * s * s + ln * c * c, 4), round((lm - ln) * s * c, 4)],
-                  [round((lm - ln) * s * c, 4), round(lm * c * c + ln * s * s, 4)]]
-            await _broadcast({
-                "type": "dead_reckon", "lat": state.dr_lat, "lon": state.dr_lon,
-                "gps_age_sec": round(gps_age, 1),
-                "fix_type": "dead_reckon",
-                "mean": [state.dr_lat, state.dr_lon],
-                "cov": cv,
-            })
+            await _broadcast(_dead_reckon_payload())
 
         # ---- Vessel 2 (support) figure-8 holding pattern ----
         cos_lat = math.cos(math.radians(BASE_LAT))
@@ -1155,6 +1308,7 @@ async def _simulator_loop() -> None:
         state.vessel2_heading = round(v2_hdg, 1)
         state.vessel2_speed = V2_SPEED_MS
 
+        support_timestamp = _now()
         await _broadcast({
             "type": "gps",
             "vessel": "support",
@@ -1162,7 +1316,7 @@ async def _simulator_loop() -> None:
             "lon": round(v2_lon, 6),
             "speed_kn": round(V2_SPEED_MS * 1.94384, 1),
             "heading_deg": round(v2_hdg, 1),
-            "timestamp": _last_ts("gps"),
+            "timestamp": support_timestamp,
         })
         state.vessel2_track.append({
             "lat": round(v2_lat, 6),

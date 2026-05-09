@@ -325,6 +325,9 @@ function toggleGpsDenial(){
   }
 }
 function setGpsDeniedState(denied){
+  if(gpsDenied===denied){
+    return;
+  }
   gpsDenied=denied;var btn=document.getElementById('gpsdeny-btn');
   var timer=document.getElementById('gpsdeny-timer');
   var banner=document.getElementById('gpsdeny-banner');
@@ -364,6 +367,9 @@ function fetchDeadReckon(){
 }
 function updateDRVisualization(d){
   var drLat=d.dr_lat,drLon=d.dr_lon;
+  if(drLat==null){drLat=d.lat;}
+  if(drLon==null){drLon=d.lon;}
+  if(drLat==null||drLon==null)return;
   var gpsLat=d.gps_lat,gpsLon=d.gps_lon;
   var ell=d.uncertainty_ellipse;
   var headingSource=d.heading_source||'Magnetometer';
@@ -531,6 +537,7 @@ var isV2=data.vessel==='support';
 switch(data.type){
 case'history':var hd=data.data;if(hd){if(hd.gps&&hd.gps.length){var g=hd.gps[hd.gps.length-1];state.lat=g.lat;state.lon=g.lon;state.speed=g.speed_kn||0;state.heading=g.heading_deg!=null?g.heading_deg:null;updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);}if(hd.pressure&&hd.pressure.length){var p=hd.pressure[hd.pressure.length-1];if(p.depth_m!=null)updateDepth(p.depth_m);}if(hd.barometer&&hd.barometer.length){var b=hd.barometer[hd.barometer.length-1];if(b.pressure_hpa!=null)updateBarometer(b.pressure_hpa);}}break;
 case'gps':if(data.lat!=null&&data.lon!=null){if(isV2){v2.lat=data.lat;v2.lon=data.lon;v2.heading=data.heading_deg!=null?data.heading_deg:v2.heading;v2.speed=data.speed_kn!=null?data.speed_kn:v2.speed;updateVessel2Marker(v2.lat,v2.lon,v2.heading);appendV2TrackPoint(v2.lat,v2.lon);}else{state.lat=data.lat;state.lon=data.lon;state.heading=data.heading_deg!=null?data.heading_deg:state.heading;state.speed=data.speed_kn!=null?data.speed_kn:state.speed;updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);appendTrackPoint(state.lat,state.lon);drawCompass(state.heading);}updateFleetPanel();}break;
+case'dead_reckon':updateDRVisualization(data);break;
 case'pressure':if(data.depth_m!=null)updateDepth(data.depth_m);break;
 case'barometer':if(data.pressure_hpa!=null)updateBarometer(data.pressure_hpa);break;
 }};
