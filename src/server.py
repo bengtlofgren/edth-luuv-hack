@@ -56,10 +56,6 @@ import uvicorn
 BUFFER_SIZE = 300
 SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
 
-SIMULATOR_DISABLED = (
-    os.environ.get("DISABLE_SIMULATOR", "0").lower() in {"1", "true", "yes"}
-)
-
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -255,6 +251,8 @@ async def _replay_runner(replay: SimrisReplay, speed: float = 1.0) -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):  # noqa: ARG001
+    if not SIMULATOR_DISABLED:
+        state.simulator_task = asyncio.create_task(_simulator_loop())
     yield
     if state.simulator_task is not None:
         state.simulator_task.cancel()
@@ -610,20 +608,15 @@ async def export_csv():
 # ---------------------------------------------------------------------------
 
 
-class ReplaySpeed(BaseModel):
-    speed: float = Field(default=1.0, ge=0.1, le=1000.0)
-
 
 @app.post("/api/replay/start")
-async def replay_start(body: ReplaySpeed):
+async def replay_start(speed: float = 1.0):
     """Start replaying the Simris field dataset at the given speed multiplier."""
-    if state.replay.running:
-        return {"status": "already_running", "speed": body.speed}
     state.replay = SimrisReplay()
     async def _run():
-        await _replay_runner(state.replay, speed=body.speed)
+        await _replay_runner(state.replay, speed=speed)
     state.replay_task = asyncio.create_task(_run())
-    return {"status": "started", "speed": body.speed}
+    return {"status": "running"}
 
 
 @app.post("/api/replay/stop")
