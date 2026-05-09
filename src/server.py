@@ -328,11 +328,19 @@ async def post_data(data: DataPayload):
                     state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
                 _recalc_drift()
         if sensor.name == "magnetometer":
-            x = sensor.values.get("x", 0.0) - state.mag_hard_iron[0]
-            y = sensor.values.get("y", 0.0) - state.mag_hard_iron[1]
-            if math.isfinite(x) and math.isfinite(y):
-                state.mag_heading = math.degrees(math.atan2(y, x)) % 360.0
-                state.dr_heading = state.mag_heading
+            # Use teammate MagnetometerCorrectionLayer for proper calibration
+            try:
+                raw = RawMagnetometerMeasurement(
+                    x=sensor.values.get("x", 0.0),
+                    y=sensor.values.get("y", 0.0),
+                    z=sensor.values.get("z", 0.0),
+                )
+                corrected = state.mag_correction.correct(raw, roll=0.0, pitch=0.0)
+                if corrected is not None:
+                    state.mag_heading = math.degrees(corrected.yaw) % 360.0
+                    state.dr_heading = state.mag_heading
+            except Exception:
+                pass
     return {"status": "ok"}
 
 @app.post("/gps")
@@ -344,6 +352,25 @@ async def post_gps(data: GpsData):
     if data.heading_deg is not None:
         entry["heading_deg"] = data.heading_deg
     _buffer_sensor("gps", entry)
+    # Kalman GPS correction using teammate DvlImuKalmanLayer
+    try:
+        import numpy as np
+        from dvl_correction.src.dvl_imu_kalman import CorrectedDvlMeasurement
+        dvl = CorrectedDvlMeasurement(
+            position=np.array([data.lat, data.lon, 0.0]),
+            velocity=np.array([0.0, 0.0, 0.0]),
+            position_covariance=np.diag([4.0, 4.0, 0.01]),
+            velocity_covariance=np.diag([0.5, 0.5, 0.5]),
+            beams_valid=4, status=0,
+        )
+        state.kf.correct(dvl)
+        out = state.kf.output()
+        if out:
+            state.kf_output = out
+            state.kf_covariance = out.position_covariance[:2, :2].tolist()
+    except Exception:
+        pass
+
     if not state.gps_denied:
         await _broadcast({
             "type": "gps",
@@ -613,6 +640,7 @@ async def export_csv():
 async def replay_start(speed: float = 1.0):
     """Start replaying the Simris field dataset at the given speed multiplier."""
     state.replay = SimrisReplay()
+    state.replay.running = True
     async def _run():
         await _replay_runner(state.replay, speed=speed)
     state.replay_task = asyncio.create_task(_run())
