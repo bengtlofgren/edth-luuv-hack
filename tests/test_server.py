@@ -1440,6 +1440,92 @@ class TestLiveDvlAndPlannerWs:
             assert any(msg == {"type": "status", "state": "running"} for msg in messages)
 
 
+class TestOperatorHardening:
+    @pytest.mark.asyncio
+    async def test_mode_health_events_and_reset(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("EDTH_RUNTIME_DIR", str(tmp_path))
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/mode", json={"mode": "training"})
+            assert resp.status_code == 200
+            assert resp.json()["mode"] == "training"
+
+            resp = await ac.get("/api/health")
+            assert resp.status_code == 200
+            assert resp.json()["mode"] == "training"
+
+            resp = await ac.get("/api/events")
+            assert resp.status_code == 200
+            assert any(event["kind"] == "mode" for event in resp.json())
+
+            resp = await ac.post("/api/estimator/reset", json={"clear_buffers": True})
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "reset"
+
+    @pytest.mark.asyncio
+    async def test_config_persistence_and_mag_calibration(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("EDTH_RUNTIME_DIR", str(tmp_path))
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/api/config",
+                json={
+                    "config": {
+                        "mode": "live",
+                        "magnetometer": {
+                            "enabled": False,
+                            "hard_iron_offset_uT": [1.0, 2.0, 3.0],
+                            "soft_iron_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                            "expected_field_magnitude_uT": 48.0,
+                        },
+                        "safety": {"min_depth_m": 3.0},
+                    }
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()["config"]
+            assert data["mode"] == "live"
+            assert data["magnetometer"]["enabled"] is False
+            assert data["safety"]["min_depth_m"] == 3.0
+
+            resp = await ac.get("/api/calibration/magnetometer")
+            assert resp.status_code == 200
+            assert resp.json()["hard_iron_offset_uT"] == [1.0, 2.0, 3.0]
+
+    @pytest.mark.asyncio
+    async def test_recording_is_persisted_and_listed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("EDTH_RUNTIME_DIR", str(tmp_path))
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.get("/api/recording/start")
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 1.0})
+            resp = await ac.get("/api/recording/stop")
+            assert resp.status_code == 200
+            recording_id = resp.json()["recording_id"]
+
+            resp = await ac.get("/api/recording/list")
+            assert resp.status_code == 200
+            assert any(item["id"] == recording_id for item in resp.json()["recordings"])
+
+            resp = await ac.get("/api/recording/playback", params={"recording_id": recording_id})
+            assert resp.status_code == 200
+            assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_planner_validation_reports_safety_metadata(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/planner/validate", json={"waypoints": [[0, 0], [100, 0]]})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "warnings" in data
+            assert data["total_length_m"] == pytest.approx(100.0)
+
+
 # ===================================================================
 # 66-68.  Integration: GPS denial doesn't break other features
 # ===================================================================

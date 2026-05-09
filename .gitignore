@@ -69,3 +69,6 @@ target/
 target/doc/
 tarpaulin-report.html
 venv/
+runtime/
+test-results/
+playwright-report/

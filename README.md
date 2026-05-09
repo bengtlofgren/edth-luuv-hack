@@ -18,10 +18,25 @@ Monorepo for navigation fusion experiments on a corrected DVL + IMU stack.
 
 ## Run The Command Center
 
+One-command local demo:
+
+```sh
+make dev
+```
+
+or directly:
+
+```sh
+./scripts/run_all.sh
+```
+
+Manual startup:
+
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+cd frontend/web && npm ci && npm run build && cd ../..
 python -m uvicorn src.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -49,6 +64,26 @@ The optional Rust stub still speaks the same WebSocket contract:
 cd frontend/server
 cargo run
 ```
+
+## Live DVL
+
+The command center accepts corrected or raw DVL payloads at `POST /api/dvl` and
+reports diagnostics at `GET /api/dvl/status`. Use the feeder for CSV, JSONL, or
+UDP JSON:
+
+```sh
+python scripts/feed_dvl.py --csv dvl.csv --speed 1
+python scripts/feed_dvl.py --udp 9999
+```
+
+The main GUI shows DVL update count, rejection count, sample age, sensor health,
+mode, event log, and estimator reset/config controls.
+
+## Runtime Data
+
+Runtime config and saved mission recordings are written under `runtime/` by
+default. Override with `EDTH_RUNTIME_DIR`, `EDTH_CONFIG_PATH`, or
+`EDTH_RECORDINGS_DIR`.
 
 ## Offline Allan Variance
 
@@ -81,4 +116,5 @@ Rust and frontend:
 cd imu-drift && cargo test --locked && cargo test --locked --features sample
 cd frontend/server && cargo test --locked
 cd frontend/web && npm ci && npm run typecheck && npm run build
+cd frontend/web && npx playwright install chromium && npm run test:browser
 ```

@@ -8,6 +8,7 @@ track history, state endpoint, and static file serving.
 
 import asyncio
 import io
+import json
 import math
 import sys
 from pathlib import Path
@@ -25,14 +26,18 @@ except ImportError:
 # Teammate estimation tools
 from dvl_correction import (
     CorrectedDvlMeasurement,
+    DvlDeadReckoningTrack,
     DvlCorrectionLayer,
     DvlImuKalmanLayer,
     ImuSample,
     KalmanConfig,
+    MagnetometerCalibration,
     MagnetometerCorrectionLayer,
+    NavigationFusionPipeline,
     NavigationOutput,
     RawDvlMeasurement,
     RawMagnetometerMeasurement,
+    SynchronizerConfig,
 )
 
 from src.replay import SimrisReplay
@@ -72,8 +77,12 @@ SIMULATOR_DISABLED = os.environ.get(
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 PLANNER_DIST_DIR = _PROJECT_ROOT / "frontend" / "web" / "dist"
 PLANNER_INDEX = PLANNER_DIST_DIR / "index.html"
+RUNTIME_DIR = Path(os.environ.get("EDTH_RUNTIME_DIR", _PROJECT_ROOT / "runtime"))
+CONFIG_PATH = Path(os.environ.get("EDTH_CONFIG_PATH", RUNTIME_DIR / "command_center_config.json"))
+RECORDINGS_DIR = Path(os.environ.get("EDTH_RECORDINGS_DIR", RUNTIME_DIR / "recordings"))
 
 SENSOR_NAMES = {"accelerometer", "magnetometer", "gyroscope", "orientation", "barometer"}
+APP_MODES = {"simulator", "replay", "live", "training"}
 
 # Real data location — Simrishamn field test
 BASE_LAT = 55.5601
@@ -118,6 +127,24 @@ class PressureData(BaseModel):
 
 class GpsDenialIn(BaseModel):
     enabled: bool
+
+
+class ModeIn(BaseModel):
+    mode: str
+
+
+class RecordingSaveIn(BaseModel):
+    name: str | None = None
+
+
+class ConfigIn(BaseModel):
+    config: dict[str, Any]
+
+
+class EstimatorResetIn(BaseModel):
+    clear_buffers: bool = False
+    clear_track: bool = False
+    clear_events: bool = False
 
 
 class MagCorrectionIn(BaseModel):
@@ -170,6 +197,9 @@ class AppState:
         self.websockets: set[WebSocket] = set()
         self.simulator_task: asyncio.Task[None] | None = None
         self.track_buffer: deque[dict[str, Any]] = deque(maxlen=2000)
+        self.mode: str = "live" if SIMULATOR_DISABLED else "simulator"
+        self.events: deque[dict[str, Any]] = deque(maxlen=500)
+        self.event_next_id: int = 1
 
         # Waypoints & IMU drift tracking
         self.waypoints: list[dict[str, Any]] = []
@@ -193,6 +223,7 @@ class AppState:
         self.recorded_frames: list[dict[str, Any]] = []
         self.recording_start_time: float = 0.0
         self.last_record_time: float = 0.0
+        self.last_recording_id: str | None = None
 
         # GPS denial & dead reckoning
         self.gps_denied: bool = False
@@ -204,6 +235,12 @@ class AppState:
         # Teammate estimation tools
         self.kf: DvlImuKalmanLayer = DvlImuKalmanLayer(config=KalmanConfig())
         self.dvl_correction: DvlCorrectionLayer = DvlCorrectionLayer()
+        self.fusion_pipeline: NavigationFusionPipeline = NavigationFusionPipeline(
+            kalman=self.kf,
+            dvl_correction=self.dvl_correction,
+            dvl_track=DvlDeadReckoningTrack(),
+            config=SynchronizerConfig(max_delay_s=0.1),
+        )
         self.mag_correction: MagnetometerCorrectionLayer = MagnetometerCorrectionLayer()
         self.mag_correction_enabled: bool = True
         self.kf_output: NavigationOutput | None = None
@@ -215,6 +252,9 @@ class AppState:
         self.dvl_raw_count: int = 0
         self.dvl_rejected_count: int = 0
         self.dvl_updates_applied: int = 0
+        self.dvl_quality_rejections: int = 0
+        self.dvl_gate_rejections: int = 0
+        self.dvl_sample_times: deque[float] = deque(maxlen=300)
         self.latest_dvl: dict[str, Any] | None = None
 
         # Real data replay
@@ -226,8 +266,18 @@ class AppState:
         # Magnetometer calibration
         self.mag_hard_iron: list[float] = [0.0, 0.0, 0.0]
         self.mag_soft_iron: list[list[float]] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        self.expected_mag_field_uT: float = 50.0
         self.mag_heading: float = 0.0
         self.dr_heading_source: str = "magnetometer"
+
+        # Operator settings
+        self.safety_config: dict[str, float] = {
+            "min_depth_m": 2.0,
+            "max_route_length_m": 2500.0,
+            "max_gps_age_sec": 30.0,
+            "max_uncertainty_m": 50.0,
+            "max_support_distance_m": 1500.0,
+        }
 
         # Embedded metric planner route. Planner x is east, y is north, metres.
         self.planner_path_m: list[tuple[float, float]] = []
@@ -239,6 +289,155 @@ class AppState:
         self.planner_done: bool = False
 
 state = AppState()
+
+
+# ---------------------------------------------------------------------------
+# Configuration, mode, and event helpers
+# ---------------------------------------------------------------------------
+
+def _new_fusion_pipeline() -> NavigationFusionPipeline:
+    return NavigationFusionPipeline(
+        kalman=state.kf,
+        dvl_correction=state.dvl_correction,
+        dvl_track=DvlDeadReckoningTrack(),
+        config=SynchronizerConfig(max_delay_s=0.1),
+    )
+
+
+def _log_event(
+    kind: str,
+    message: str,
+    severity: str = "info",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = {
+        "id": state.event_next_id,
+        "timestamp": time.time(),
+        "kind": kind,
+        "severity": severity,
+        "message": message,
+        "data": data or {},
+    }
+    state.event_next_id += 1
+    state.events.append(event)
+    return event
+
+
+async def _emit_event(
+    kind: str,
+    message: str,
+    severity: str = "info",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = _log_event(kind, message, severity, data)
+    await _broadcast({"type": "event", **event})
+    return event
+
+
+def _config_snapshot() -> dict[str, Any]:
+    return {
+        "mode": state.mode,
+        "magnetometer": {
+            "enabled": state.mag_correction_enabled,
+            "hard_iron_offset_uT": state.mag_hard_iron,
+            "soft_iron_matrix": state.mag_soft_iron,
+            "expected_field_magnitude_uT": state.expected_mag_field_uT,
+        },
+        "safety": state.safety_config,
+        "replay": {"speed": state.replay_speed},
+    }
+
+
+def _apply_config(config: dict[str, Any]) -> None:
+    mode = config.get("mode")
+    if isinstance(mode, str) and mode in APP_MODES:
+        state.mode = mode
+
+    mag = config.get("magnetometer")
+    if isinstance(mag, dict):
+        state.mag_correction_enabled = bool(mag.get("enabled", state.mag_correction_enabled))
+        hard_iron = mag.get("hard_iron_offset_uT", state.mag_hard_iron)
+        soft_iron = mag.get("soft_iron_matrix", state.mag_soft_iron)
+        expected = float(mag.get("expected_field_magnitude_uT", state.expected_mag_field_uT))
+        hard_array = np.asarray(hard_iron, dtype=float)
+        soft_array = np.asarray(soft_iron, dtype=float)
+        if hard_array.shape != (3,):
+            raise ValueError("magnetometer.hard_iron_offset_uT must have 3 values")
+        if soft_array.shape != (3, 3):
+            raise ValueError("magnetometer.soft_iron_matrix must be 3x3")
+        if not math.isfinite(expected) or expected <= 0.0:
+            raise ValueError("magnetometer.expected_field_magnitude_uT must be positive")
+        state.mag_hard_iron = hard_array.tolist()
+        state.mag_soft_iron = soft_array.tolist()
+        state.expected_mag_field_uT = expected
+        state.mag_correction = MagnetometerCorrectionLayer(
+            calibration=MagnetometerCalibration(
+                hard_iron_offset_uT=state.mag_hard_iron,
+                soft_iron_matrix=state.mag_soft_iron,
+                expected_field_magnitude_uT=state.expected_mag_field_uT,
+            )
+        )
+
+    safety = config.get("safety")
+    if isinstance(safety, dict):
+        for key in state.safety_config:
+            if key in safety:
+                value = float(safety[key])
+                if not math.isfinite(value) or value < 0.0:
+                    raise ValueError(f"safety.{key} must be finite and non-negative")
+                state.safety_config[key] = value
+
+    replay = config.get("replay")
+    if isinstance(replay, dict) and "speed" in replay:
+        speed = float(replay["speed"])
+        if math.isfinite(speed) and speed > 0.0:
+            state.replay_speed = speed
+            state.replay.speed = speed
+
+
+def _load_persisted_config() -> None:
+    if not CONFIG_PATH.is_file():
+        return
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if isinstance(config, dict):
+            _apply_config(config)
+            _log_event("config", f"Loaded configuration from {CONFIG_PATH}")
+    except Exception as exc:
+        _log_event("config", f"Failed to load configuration: {exc}", severity="warning")
+
+
+def _save_config() -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(_config_snapshot(), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _reset_estimator(clear_buffers: bool = False, clear_track: bool = False, clear_events: bool = False) -> None:
+    state.kf = DvlImuKalmanLayer(config=KalmanConfig())
+    state.dvl_correction = DvlCorrectionLayer()
+    state.fusion_pipeline = _new_fusion_pipeline()
+    state.kf_output = None
+    state.kf_covariance = [[1.0, 0.0], [0.0, 1.0]]
+    state.nav_origin_lat = None
+    state.nav_origin_lon = None
+    state.latest_accel_m_s2 = None
+    state.latest_gyro_rad_s = None
+    state.dvl_raw_count = 0
+    state.dvl_rejected_count = 0
+    state.dvl_updates_applied = 0
+    state.dvl_quality_rejections = 0
+    state.dvl_gate_rejections = 0
+    state.dvl_sample_times.clear()
+    state.latest_dvl = None
+    state.dr_lat = None
+    state.dr_lon = None
+    if clear_buffers:
+        state.buffers.clear()
+    if clear_track:
+        state.track_buffer.clear()
+        state.vessel2_track.clear()
+    if clear_events:
+        state.events.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -442,14 +641,88 @@ def _maybe_process_imu(timestamp_s: float) -> None:
         return
     if state.kf.last_timestamp_s is not None and timestamp_s <= state.kf.last_timestamp_s:
         return
-    output = state.kf.process(
-        ImuSample(
-            timestamp_s=timestamp_s,
-            angular_velocity_rad_s=state.latest_gyro_rad_s,
-            linear_acceleration_m_s2=state.latest_accel_m_s2,
-        )
+    sample = ImuSample(
+        timestamp_s=timestamp_s,
+        angular_velocity_rad_s=state.latest_gyro_rad_s,
+        linear_acceleration_m_s2=state.latest_accel_m_s2,
     )
-    _remember_kf_output(output)
+    try:
+        outputs = state.fusion_pipeline.add_imu_sample(sample)
+        outputs.extend(state.fusion_pipeline.flush())
+    except ValueError:
+        output = state.kf.process(sample)
+        _remember_kf_output(output)
+        return
+    for output in outputs:
+        _remember_kf_output(output)
+    if not outputs:
+        _remember_kf_output(
+            state.kf.output(
+                timestamp_s,
+                dvl_update_applied=False,
+                magnetometer_update_applied=False,
+            )
+        )
+
+
+def _fallback_imu_sample(timestamp_s: float) -> ImuSample:
+    return ImuSample(
+        timestamp_s=timestamp_s,
+        angular_velocity_rad_s=state.latest_gyro_rad_s or [0.0, 0.0, 0.0],
+        linear_acceleration_m_s2=state.latest_accel_m_s2 or [0.0, 0.0, 9.80665],
+    )
+
+
+def _format_nav_output(output: NavigationOutput | None) -> dict[str, Any] | None:
+    if output is None:
+        return None
+    latlon = _nav_m_to_latlon(output.position_m)
+    return {
+        "timestamp_s": output.timestamp_s,
+        "position_m": [float(v) for v in np.asarray(output.position_m)],
+        "velocity_m_s": [float(v) for v in np.asarray(output.velocity_m_s)],
+        "lat": None if latlon is None else latlon[0],
+        "lon": None if latlon is None else latlon[1],
+        "dvl_update_applied": output.dvl_update_applied,
+        "magnetometer_update_applied": output.magnetometer_update_applied,
+    }
+
+
+def _direct_dvl_update(corrected: CorrectedDvlMeasurement) -> NavigationOutput:
+    update_applied = state.kf.update_corrected_dvl(corrected)
+    if update_applied:
+        state.dvl_updates_applied += 1
+    else:
+        state.dvl_gate_rejections += 1
+    return state.kf.output(corrected.timestamp_s, dvl_update_applied=update_applied)
+
+
+def _process_raw_dvl(raw: RawDvlMeasurement) -> tuple[str, NavigationOutput | None, CorrectedDvlMeasurement | None]:
+    try:
+        state.fusion_pipeline.add_imu_sample(_fallback_imu_sample(raw.timestamp_s))
+        outputs = state.fusion_pipeline.add_raw_dvl_measurement(raw)
+        outputs.extend(state.fusion_pipeline.flush())
+    except ValueError:
+        corrected = state.dvl_correction.correct(
+            raw,
+            angular_velocity_body_rad_s=state.latest_gyro_rad_s or [0.0, 0.0, 0.0],
+        )
+        if corrected is None:
+            state.dvl_quality_rejections += 1
+            return "quality_gate", None, None
+        return "accepted", _direct_dvl_update(corrected), corrected
+
+    diag = state.fusion_pipeline.diagnostics
+    state.dvl_quality_rejections = diag.dvl_quality_rejections
+    state.dvl_gate_rejections = diag.dvl_gate_rejections
+    state.dvl_updates_applied = diag.dvl_updates_applied
+    if not outputs:
+        state.dvl_quality_rejections += 1
+        return "quality_gate", None, None
+
+    output = outputs[-1]
+    corrected = None
+    return "accepted", output, corrected
 
 
 def _apply_magnetometer(values: dict[str, float], timestamp_s: float) -> None:
@@ -590,6 +863,34 @@ def _disable_gps_denial() -> None:
     state.gps_deny_start_time = None
 
 
+async def _stop_replay_task() -> None:
+    state.replay.stop()
+    if state.replay_task is not None:
+        state.replay_task.cancel()
+        try:
+            await state.replay_task
+        except asyncio.CancelledError:
+            pass
+        state.replay_task = None
+
+
+async def _set_app_mode(mode: str) -> dict[str, Any]:
+    mode = mode.lower()
+    if mode not in APP_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {sorted(APP_MODES)}")
+    previous = state.mode
+    if mode != "replay":
+        await _stop_replay_task()
+    if mode == "training":
+        _enable_gps_denial()
+    elif mode in {"simulator", "live", "replay"}:
+        _disable_gps_denial()
+    state.mode = mode
+    if previous != mode:
+        await _emit_event("mode", f"Mode changed from {previous} to {mode}", data={"mode": mode})
+    return {"mode": state.mode, "previous_mode": previous, "gps_denied": state.gps_denied}
+
+
 def _dead_reckon_payload() -> dict[str, Any]:
     now = _now()
     last_gps = _latest_gps()
@@ -655,6 +956,7 @@ def _dead_reckon_payload() -> dict[str, Any]:
         "mean": [lat, lon],
         "cov": covariance,
         "covariance": covariance,
+        "uncertainty_reasons": _uncertainty_reasons(),
         "drift_stats": {
             "gyro_bias_dps": round(state.gyro_z_bias * (180.0 / math.pi), 4),
             "arw_deg_per_sqrt_s": 0.0,
@@ -730,6 +1032,7 @@ async def _replay_runner(replay: SimrisReplay, speed: float = 1.0) -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):  # noqa: ARG001
+    _load_persisted_config()
     if not SIMULATOR_DISABLED:
         state.simulator_task = asyncio.create_task(_simulator_loop())
     yield
@@ -927,36 +1230,34 @@ async def _handle_dvl(data: DvlData) -> dict[str, Any]:
         velocity_scale_factor=data.velocity_scale_factor,
     )
     state.dvl_raw_count += 1
+    state.dvl_sample_times.append(_now())
     try:
-        corrected = state.dvl_correction.correct(
-            raw,
-            angular_velocity_body_rad_s=state.latest_gyro_rad_s or [0.0, 0.0, 0.0],
-        )
+        status, output, corrected = _process_raw_dvl(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if corrected is None:
+    if status != "accepted" or output is None:
         state.dvl_rejected_count += 1
         state.latest_dvl = {
             "timestamp": timestamp_s,
+            "received_at": _now(),
             "status": "rejected",
-            "reason": "quality_gate",
+            "reason": status,
+            "valid_beams": data.valid_beams,
+            "altitude_m": data.altitude_m,
+            "mode": data.mode,
+            "raw_status": data.status,
         }
         _buffer_sensor("dvl", state.latest_dvl)
         await _broadcast({"type": "dvl", **state.latest_dvl})
+        await _emit_event("dvl", f"DVL sample rejected: {status}", "warning", state.latest_dvl)
         return {
             "status": "rejected",
-            "reason": "quality_gate",
+            "reason": status,
             "diagnostics": _dvl_status_payload(),
         }
 
-    try:
-        update_applied = state.kf.update_corrected_dvl(corrected)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if update_applied:
-        state.dvl_updates_applied += 1
-    _remember_kf_output(state.kf.output(timestamp_s, dvl_update_applied=update_applied))
+    _remember_kf_output(output)
 
     if state.gps_denied and state.kf_output is not None:
         kf_latlon = _nav_m_to_latlon(state.kf_output.position_m)
@@ -966,15 +1267,21 @@ async def _handle_dvl(data: DvlData) -> dict[str, Any]:
             if velocity.shape[0] >= 2 and np.all(np.isfinite(velocity[:2])):
                 state.dr_last_gps_speed_kn = float(np.linalg.norm(velocity[:2]) * 1.94384)
 
-    velocity_body = None if corrected.velocity_body_m_s is None else [float(v) for v in np.asarray(corrected.velocity_body_m_s)]
-    position_nav = None if corrected.position_nav_m is None else [float(v) for v in np.asarray(corrected.position_nav_m)]
+    velocity_body = None if corrected is None or corrected.velocity_body_m_s is None else [float(v) for v in np.asarray(corrected.velocity_body_m_s)]
+    position_nav = None if corrected is None or corrected.position_nav_m is None else [float(v) for v in np.asarray(corrected.position_nav_m)]
     uncertainty = _navigation_uncertainty_payload(state.dr_heading)
     state.latest_dvl = {
         "timestamp": timestamp_s,
+        "received_at": _now(),
         "status": "accepted",
-        "dvl_update_applied": update_applied,
+        "dvl_update_applied": output.dvl_update_applied,
         "velocity_body_m_s": velocity_body,
         "position_nav_m": position_nav,
+        "valid_beams": data.valid_beams,
+        "altitude_m": data.altitude_m,
+        "mode": data.mode,
+        "raw_status": data.status,
+        "estimate": _format_nav_output(output),
         **uncertainty,
     }
     _buffer_sensor("dvl", state.latest_dvl)
@@ -982,7 +1289,7 @@ async def _handle_dvl(data: DvlData) -> dict[str, Any]:
     _record_frame("dvl", force=True)
     return {
         "status": "accepted",
-        "dvl_update_applied": update_applied,
+        "dvl_update_applied": output.dvl_update_applied,
         "velocity_body_m_s": velocity_body,
         "position_nav_m": position_nav,
         "diagnostics": _dvl_status_payload(),
@@ -991,12 +1298,186 @@ async def _handle_dvl(data: DvlData) -> dict[str, Any]:
 
 
 def _dvl_status_payload() -> dict[str, Any]:
+    now = _now()
+    recent = [ts for ts in state.dvl_sample_times if now - ts <= 5.0]
+    latest_ts = state.latest_dvl.get("received_at") if state.latest_dvl else None
     return {
         "raw_measurements": state.dvl_raw_count,
         "rejected_measurements": state.dvl_rejected_count,
         "updates_applied": state.dvl_updates_applied,
+        "quality_rejections": state.dvl_quality_rejections,
+        "gate_rejections": state.dvl_gate_rejections,
+        "rate_hz": round(len(recent) / 5.0, 2),
+        "last_age_sec": None if latest_ts is None else round(max(0.0, now - float(latest_ts)), 2),
         "latest": state.latest_dvl,
     }
+
+
+def _sensor_status(name: str, stale_after_s: float) -> dict[str, Any]:
+    buf = state.buffers.get(name)
+    now = _now()
+    if not buf:
+        return {"ok": False, "count": 0, "age_sec": None, "rate_hz": 0.0, "latest": None}
+    latest = buf[-1]
+    latest_ts = latest.get("timestamp", latest.get("received_at"))
+    age = None if latest_ts is None else max(0.0, now - float(latest_ts))
+    recent = [entry for entry in buf if now - float(entry.get("timestamp", entry.get("received_at", 0.0))) <= 5.0]
+    return {
+        "ok": age is not None and age <= stale_after_s,
+        "count": len(buf),
+        "age_sec": None if age is None else round(age, 2),
+        "rate_hz": round(len(recent) / 5.0, 2),
+        "latest": latest,
+    }
+
+
+def _uncertainty_reasons() -> list[str]:
+    reasons: list[str] = []
+    if state.gps_denied:
+        reasons.append("GPS denied; position is dead-reckoned")
+    gps_age = _gps_age_sec()
+    if gps_age is None:
+        reasons.append("No GPS fix has been received")
+    elif gps_age > state.safety_config["max_gps_age_sec"]:
+        reasons.append(f"GPS fix is stale ({gps_age:.1f}s old)")
+    if state.dvl_rejected_count:
+        reasons.append(f"{state.dvl_rejected_count} DVL sample(s) rejected")
+    if state.dvl_raw_count == 0:
+        reasons.append("No live DVL updates")
+    if not state.mag_correction_enabled:
+        reasons.append("Magnetometer heading correction is disabled")
+    if state.drift_rate_dps > 0.05:
+        reasons.append("IMU gyro drift estimate is elevated")
+    return reasons
+
+
+def _health_payload() -> dict[str, Any]:
+    sensors = {
+        "gps": _sensor_status("gps", 5.0 if state.mode == "simulator" else state.safety_config["max_gps_age_sec"]),
+        "accelerometer": _sensor_status("accelerometer", 2.0),
+        "gyroscope": _sensor_status("gyroscope", 2.0),
+        "magnetometer": _sensor_status("magnetometer", 5.0),
+        "barometer": _sensor_status("barometer", 5.0),
+        "pressure": _sensor_status("pressure", 5.0),
+        "dvl": _dvl_status_payload(),
+    }
+    critical_ok = sensors["accelerometer"]["ok"] and sensors["gyroscope"]["ok"]
+    position_ok = sensors["gps"]["ok"] or state.gps_denied or state.dvl_updates_applied > 0
+    status = "ok" if critical_ok and position_ok else "degraded"
+    if not critical_ok:
+        status = "critical"
+    return {
+        "status": status,
+        "mode": state.mode,
+        "gps_denied": state.gps_denied,
+        "estimator": {
+            "initialized": state.kf_output is not None,
+            "last_timestamp_s": state.kf.last_timestamp_s,
+            "uncertainty_reasons": _uncertainty_reasons(),
+        },
+        "sensors": sensors,
+    }
+
+
+def _validate_planner_points(points: list[tuple[float, float]]) -> dict[str, Any]:
+    warnings: list[dict[str, Any]] = []
+    total_length = sum(
+        math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+        for i in range(len(points) - 1)
+    )
+    min_depth = float("inf")
+    shallow_samples = 0
+    missing_depth_samples = 0
+    samples_checked = 0
+    for i in range(len(points) - 1):
+        p0, p1 = points[i], points[i + 1]
+        seg_len = max(1.0, math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        sample_count = max(2, min(20, int(seg_len // 25) + 2))
+        for j in range(sample_count):
+            alpha = j / max(1, sample_count - 1)
+            x = p0[0] + (p1[0] - p0[0]) * alpha
+            y = p0[1] + (p1[1] - p0[1]) * alpha
+            lat, lon = _planner_m_to_latlon(x, y)
+            depth = get_depth(lat, lon)
+            samples_checked += 1
+            if depth is None:
+                missing_depth_samples += 1
+            else:
+                min_depth = min(min_depth, depth)
+                if depth < state.safety_config["min_depth_m"]:
+                    shallow_samples += 1
+
+    if total_length > state.safety_config["max_route_length_m"]:
+        warnings.append({
+            "code": "route_long",
+            "message": f"Route length {total_length:.0f}m exceeds configured limit",
+            "limit_m": state.safety_config["max_route_length_m"],
+        })
+    if shallow_samples:
+        warnings.append({
+            "code": "shallow_depth",
+            "message": f"{shallow_samples} route sample(s) are shallower than the configured limit",
+            "min_depth_m": None if min_depth == float("inf") else round(min_depth, 1),
+            "limit_m": state.safety_config["min_depth_m"],
+        })
+    if missing_depth_samples:
+        warnings.append({
+            "code": "missing_depth",
+            "message": f"{missing_depth_samples} route sample(s) have no chart depth",
+        })
+    if state.gps_denied:
+        warnings.append({"code": "gps_denied", "message": "GPS denial is active while planning"})
+    if state.dvl_raw_count == 0:
+        warnings.append({"code": "no_dvl", "message": "No live DVL samples have been received"})
+
+    return {
+        "ok": not any(w["code"] == "shallow_depth" for w in warnings),
+        "warnings": warnings,
+        "total_length_m": round(total_length, 2),
+        "samples_checked": samples_checked,
+        "min_depth_m": None if min_depth == float("inf") else round(min_depth, 1),
+    }
+
+
+def _recording_path(recording_id: str) -> Path:
+    safe_id = "".join(ch for ch in recording_id if ch.isalnum() or ch in ("-", "_"))
+    return RECORDINGS_DIR / f"{safe_id}.json"
+
+
+def _save_recording(name: str | None = None) -> dict[str, Any]:
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    now = _now()
+    recording_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now)) + f"-{int((now % 1.0) * 1000):03d}"
+    payload = {
+        "id": recording_id,
+        "name": name or recording_id,
+        "created_at": now,
+        "frames": state.recorded_frames,
+        "frame_count": len(state.recorded_frames),
+        "duration_sec": round(now - state.recording_start_time, 1),
+    }
+    _recording_path(recording_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    state.last_recording_id = recording_id
+    return payload
+
+
+def _list_recordings() -> list[dict[str, Any]]:
+    if not RECORDINGS_DIR.is_dir():
+        return []
+    out = []
+    for path in sorted(RECORDINGS_DIR.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            out.append({
+                "id": data.get("id", path.stem),
+                "name": data.get("name", path.stem),
+                "created_at": data.get("created_at"),
+                "frame_count": data.get("frame_count", len(data.get("frames", []))),
+                "duration_sec": data.get("duration_sec"),
+            })
+        except Exception:
+            continue
+    return out
 
 
 @app.post("/dvl")
@@ -1013,6 +1494,95 @@ async def post_api_dvl(data: DvlData):
 async def get_dvl_status():
     return _dvl_status_payload()
 
+
+@app.get("/api/health")
+async def get_health():
+    return _health_payload()
+
+
+@app.get("/api/events")
+async def get_events(limit: int = 100):
+    limit = max(1, min(500, limit))
+    return list(state.events)[-limit:]
+
+
+@app.delete("/api/events")
+async def clear_events():
+    state.events.clear()
+    return {"status": "cleared"}
+
+
+@app.get("/api/config")
+async def get_config():
+    return {
+        "config": _config_snapshot(),
+        "path": str(CONFIG_PATH),
+        "persisted": CONFIG_PATH.is_file(),
+    }
+
+
+@app.post("/api/config")
+async def set_config(payload: ConfigIn):
+    try:
+        _apply_config(payload.config)
+        _save_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _emit_event("config", "Configuration updated", data={"path": str(CONFIG_PATH)})
+    return await get_config()
+
+
+@app.get("/api/calibration/magnetometer")
+async def get_magnetometer_calibration():
+    return _config_snapshot()["magnetometer"]
+
+
+@app.post("/api/calibration/magnetometer")
+async def set_magnetometer_calibration(payload: ConfigIn):
+    config = {"magnetometer": payload.config}
+    try:
+        _apply_config(config)
+        _save_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _emit_event("calibration", "Magnetometer calibration updated")
+    return _config_snapshot()["magnetometer"]
+
+
+@app.post("/api/calibration/magnetometer/capture")
+async def capture_magnetometer_calibration():
+    mag_buf = state.buffers.get("magnetometer")
+    if not mag_buf:
+        raise HTTPException(status_code=400, detail="No magnetometer samples available")
+    latest = mag_buf[-1]
+    field = np.asarray([latest.get("x", 0.0), latest.get("y", 0.0), latest.get("z", 0.0)], dtype=float)
+    magnitude = float(np.linalg.norm(field))
+    if not math.isfinite(magnitude) or magnitude <= 0.0:
+        raise HTTPException(status_code=400, detail="Latest magnetometer sample is invalid")
+    state.expected_mag_field_uT = magnitude
+    state.mag_correction = MagnetometerCorrectionLayer(
+        calibration=MagnetometerCalibration(
+            hard_iron_offset_uT=state.mag_hard_iron,
+            soft_iron_matrix=state.mag_soft_iron,
+            expected_field_magnitude_uT=state.expected_mag_field_uT,
+        )
+    )
+    _save_config()
+    await _emit_event("calibration", "Captured magnetometer field magnitude", data={"expected_field_magnitude_uT": magnitude})
+    return _config_snapshot()["magnetometer"]
+
+
+@app.post("/api/estimator/reset")
+async def reset_estimator(payload: EstimatorResetIn | None = None):
+    payload = payload or EstimatorResetIn()
+    _reset_estimator(
+        clear_buffers=payload.clear_buffers,
+        clear_track=payload.clear_track,
+        clear_events=payload.clear_events,
+    )
+    await _emit_event("estimator", "Estimator reset")
+    return {"status": "reset", "health": _health_payload()}
+
 # ---------------------------------------------------------------------------
 # State & Track endpoints
 # ---------------------------------------------------------------------------
@@ -1023,6 +1593,7 @@ async def get_api_state():
     result: dict[str, Any] = {
         "lat": None, "lon": None, "speed_kn": None, "heading_deg": None,
         "depth_m": None, "timestamp": None,
+        "mode": state.mode,
         "gps_denied": state.gps_denied,
         "position_source": "dead_reckon" if state.gps_denied else "gps",
         "vessel2_lat": state.vessel2_lat, "vessel2_lon": state.vessel2_lon,
@@ -1041,6 +1612,23 @@ async def get_api_state():
     if pressure_buf:
         last_pressure = pressure_buf[-1]
         result["depth_m"] = last_pressure.get("depth_m")
+    return result
+
+
+@app.get("/api/mode")
+async def get_mode():
+    return {
+        "mode": state.mode,
+        "available_modes": sorted(APP_MODES),
+        "gps_denied": state.gps_denied,
+        "replay_active": state.replay_task is not None,
+    }
+
+
+@app.post("/api/mode")
+async def set_mode(payload: ModeIn):
+    result = await _set_app_mode(payload.mode)
+    _save_config()
     return result
 
 @app.get("/api/track")
@@ -1147,12 +1735,26 @@ async def set_planner_path(path: PlannerPathIn):
     if total_length <= 0.0:
         raise HTTPException(status_code=400, detail="Planner route must have non-zero length")
 
+    validation = _validate_planner_points(points)
     _set_planner_path(points)
+    if validation["warnings"]:
+        _log_event("planner", "Planner route has safety warnings", "warning", validation)
     return {
         "status": "planner_route_active",
         "waypoints": _planner_geo_route(),
         "total_length_m": round(state.planner_total_length_m, 2),
+        "validation": validation,
     }
+
+
+@app.post("/api/planner/validate")
+async def validate_planner_path(path: PlannerPathIn):
+    points: list[tuple[float, float]] = []
+    for raw in path.waypoints:
+        if len(raw) != 2:
+            raise HTTPException(status_code=400, detail="Planner waypoints must be [x_m, y_m] pairs")
+        points.append((float(raw[0]), float(raw[1])))
+    return _validate_planner_points(points)
 
 
 @app.post("/api/planner/pause")
@@ -1251,6 +1853,7 @@ async def get_risk():
 async def recording_start():
     state.recording = True; state.recorded_frames = []
     state.recording_start_time = state.last_record_time = _now()
+    await _emit_event("recording", "Recording started")
     return {"status": "recording"}
 
 
@@ -1259,20 +1862,39 @@ async def recording_stop():
     state.recording = False
     n = len(state.recorded_frames)
     dur = _now() - state.recording_start_time
-    return {"frames": n, "duration_sec": round(dur, 1)}
+    saved = _save_recording()
+    await _emit_event("recording", "Recording stopped", data={"recording_id": saved["id"], "frames": n})
+    return {"frames": n, "duration_sec": round(dur, 1), "recording_id": saved["id"], "saved_path": str(_recording_path(saved["id"]))}
 
 
 @app.get("/api/recording/status")
 async def recording_status():
     elapsed = _now() - state.recording_start_time if state.recording else 0.0
-    return {"recording": state.recording, "frames": len(state.recorded_frames), "elapsed_sec": round(elapsed, 1)}
+    return {
+        "recording": state.recording,
+        "frames": len(state.recorded_frames),
+        "elapsed_sec": round(elapsed, 1),
+        "last_recording_id": state.last_recording_id,
+    }
 
 
 @app.get("/api/recording/playback")
-async def recording_playback(start: int = 0, end: int | None = None):
+async def recording_playback(start: int = 0, end: int | None = None, recording_id: str | None = None):
+    if recording_id:
+        path = _recording_path(recording_id)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Recording not found")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        frames = data.get("frames", [])
+        return frames[start:end]
     if end is None:
         end = len(state.recorded_frames)
     return state.recorded_frames[start:end]
+
+
+@app.get("/api/recording/list")
+async def recording_list():
+    return {"recordings": _list_recordings()}
 
 
 @app.get("/api/export/geojson")
@@ -1310,35 +1932,26 @@ async def export_csv():
 @app.post("/api/replay/start")
 async def replay_start(speed: float = 1.0):
     """Start replaying the Simris field dataset at the given speed multiplier."""
-    if state.replay_task is not None:
-        state.replay.stop()
-        state.replay_task.cancel()
-        try:
-            await state.replay_task
-        except asyncio.CancelledError:
-            pass
-        state.replay_task = None
+    await _stop_replay_task()
     state.replay_speed = max(speed, 0.01)
     state.replay = SimrisReplay()
     state.replay.running = True
     state.replay.speed = state.replay_speed
+    state.mode = "replay"
     async def _run():
         await _replay_runner(state.replay, speed=state.replay_speed)
     state.replay_task = asyncio.create_task(_run())
+    await _emit_event("replay", "Replay started", data={"speed": state.replay_speed})
     return {"status": "running"}
 
 
 @app.post("/api/replay/stop")
 async def replay_stop():
     """Stop an active replay."""
-    state.replay.stop()
-    if state.replay_task is not None:
-        state.replay_task.cancel()
-        try:
-            await state.replay_task
-        except asyncio.CancelledError:
-            pass
-        state.replay_task = None
+    await _stop_replay_task()
+    if state.mode == "replay":
+        state.mode = "live"
+    await _emit_event("replay", "Replay stopped")
     return {"status": "stopped"}
 
 
@@ -1353,6 +1966,7 @@ async def replay_speed(multiplier: float = 1.0):
     """Adjust the active replay speed multiplier."""
     state.replay_speed = max(multiplier, 0.01)
     state.replay.speed = state.replay_speed
+    _save_config()
     return {"status": "ok", "speed": state.replay_speed}
 
 # ---------------------------------------------------------------------------
@@ -1362,11 +1976,13 @@ async def replay_speed(multiplier: float = 1.0):
 @app.get("/api/gps-deny/on")
 async def gps_deny_on():
     _enable_gps_denial()
+    await _emit_event("gps", "GPS denial enabled", "warning")
     return {"status": "gps_denied"}
 
 @app.get("/api/gps-deny/off")
 async def gps_deny_off():
     _disable_gps_denial()
+    await _emit_event("gps", "GPS restored")
     return {"status": "gps_restored"}
 
 @app.get("/api/gps-deny/status")
@@ -1378,8 +1994,10 @@ async def gps_deny_status():
 async def set_gps_denial(payload: GpsDenialIn):
     if payload.enabled:
         _enable_gps_denial()
+        await _emit_event("gps", "GPS denial enabled", "warning")
     else:
         _disable_gps_denial()
+        await _emit_event("gps", "GPS restored")
     return _gps_denial_summary()
 
 @app.get("/api/gps-denial")
@@ -1650,6 +2268,8 @@ async def _simulator_loop() -> None:
 
     while True:
         await asyncio.sleep(SIMULATOR_RATE)
+        if state.mode not in {"simulator", "training"}:
+            continue
         sim_time += SIMULATOR_RATE
         t = sim_time
         sim_tick += 1

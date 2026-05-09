@@ -137,13 +137,38 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       <span id="gpsdeny-timer" style="font-size:11px;color:#7a8aa0;display:none">00:00</span>
     </div>
     <div id="gpsdeny-info" style="font-size:10px;color:#7a8aa0">Position source: <span id="pos-source" style="color:#00d4aa">GPS</span> ± <span id="pos-uncertainty">0.0m</span></div>
-    <div style="font-size:10px;color:#7a8aa0;margin-top:3px">DVL updates: <span id="dvl-updates">0</span> &bull; rejected: <span id="dvl-rejected">0</span></div>
+    <div style="font-size:10px;color:#7a8aa0;margin-top:3px">DVL updates: <span id="dvl-updates">0</span> &bull; rejected: <span id="dvl-rejected">0</span> &bull; age: <span id="dvl-age">--</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">System Health</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;font-family:monospace">
+      <div>Mode: <select id="mode-select" onchange="window.setMode(this.value)" style="background:#0f1f38;color:#d0d8e8;border:1px solid #1a3050;border-radius:3px;font-size:11px"><option value="simulator">Simulator</option><option value="live">Live</option><option value="replay">Replay</option><option value="training">Training</option></select></div>
+      <div>Status: <span id="health-status">--</span></div>
+      <div>IMU: <span id="health-imu">--</span></div>
+      <div>GPS: <span id="health-gps">--</span></div>
+      <div>DVL: <span id="health-dvl">--</span></div>
+      <div>Mag: <span id="health-mag">--</span></div>
+    </div>
+    <div id="uncertainty-reasons" style="font-size:10px;color:#7a8aa0;margin-top:5px;line-height:1.35">No uncertainty drivers reported</div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button class="export-btn" onclick="window.resetEstimator()">Reset Estimator</button>
+      <button class="export-btn" onclick="window.saveConfig()">Save Config</button>
+    </div>
   </div>
   <div class="panel">
     <div class="panel-title">Heading</div>
     <div id="compass-container">
       <canvas id="compass-canvas" width="100" height="100"></canvas>
       <div id="compass-heading">--</div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Calibration</div>
+    <div style="font-size:11px;color:#7a8aa0;font-family:monospace">Mag field: <span id="mag-field">--</span> uT</div>
+    <div style="font-size:10px;color:#7a8aa0;margin-top:3px">Offset: <span id="mag-offset">0,0,0</span></div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button class="export-btn" onclick="window.captureMagCalibration()">Capture Mag</button>
+      <button class="export-btn" onclick="window.fetchCalibration()">Refresh</button>
     </div>
   </div>
   <div class="panel">
@@ -168,6 +193,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       <span id="rec-status" style="font-size:11px;color:#7a8aa0">Idle</span>
       <span id="rec-time" style="font-size:11px;color:#00d4aa;display:none">00:00</span>
     </div>
+    <div id="recording-list" style="font-size:10px;color:#7a8aa0;margin-top:6px">No saved recordings</div>
   </div>
   <div class="panel" id="replay-panel">
     <div class="panel-title">Replay</div>
@@ -227,6 +253,13 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <div class="panel-title">Tools</div>
     <button class="export-btn" onclick="window.exportGeoJSON()">Export GeoJSON</button>
     <button class="export-btn" onclick="window.exportCSV()">Export CSV</button>
+    <button class="export-btn" onclick="window.toggleTracks()">Tracks</button>
+    <button class="export-btn" onclick="window.toggleUncertainty()">Uncertainty</button>
+    <button class="export-btn" onclick="window.toggleSupport()">Support</button>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Event Log</div>
+    <div id="event-log" style="max-height:120px;overflow-y:auto;font-size:10px;color:#7a8aa0;font-family:monospace;line-height:1.4">No events</div>
   </div>
 </div>
 
@@ -267,6 +300,7 @@ var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,ves
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
 var gpsDenied=false,magCorrection=true,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
 var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false;
+var showTracks=true,showUncertainty=true,showSupport=true,healthTimer=null,eventTimer=null;
 var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
 function hostPort(){return window.location.hostname+':'+(window.location.port||8000);}
@@ -345,11 +379,43 @@ function updateDvlStatus(d){
   if(!d)return;
   var updates=d.updates_applied!=null?d.updates_applied:(d.diagnostics&&d.diagnostics.updates_applied);
   var rejected=d.rejected_measurements!=null?d.rejected_measurements:(d.diagnostics&&d.diagnostics.rejected_measurements);
+  var age=d.last_age_sec!=null?d.last_age_sec:null;
   var upEl=document.getElementById('dvl-updates'),rejEl=document.getElementById('dvl-rejected');
+  var ageEl=document.getElementById('dvl-age');
   if(upEl&&updates!=null)upEl.textContent=updates;
   if(rejEl&&rejected!=null)rejEl.textContent=rejected;
+  if(ageEl)ageEl.textContent=age==null?'--':age.toFixed(1)+'s';
 }
 function fetchDvlStatus(){fetch('/api/dvl/status').then(function(r){return r.json();}).then(updateDvlStatus).catch(function(){});}
+function healthAge(s){if(!s)return'--';if(s.age_sec==null)return'stale';return s.ok?'ok '+s.age_sec.toFixed(1)+'s':'stale '+s.age_sec.toFixed(1)+'s';}
+function updateHealth(d){
+  if(!d)return;
+  var st=document.getElementById('health-status');if(st){st.textContent=d.status;st.className=d.status==='ok'?'risk-low':d.status==='critical'?'risk-high':'risk-med';}
+  var mode=document.getElementById('mode-select');if(mode&&d.mode)mode.value=d.mode;
+  var sensors=d.sensors||{};
+  var imu=(sensors.accelerometer&&sensors.accelerometer.ok&&sensors.gyroscope&&sensors.gyroscope.ok)?'ok':'stale';
+  document.getElementById('health-imu').textContent=imu;
+  document.getElementById('health-gps').textContent=healthAge(sensors.gps);
+  document.getElementById('health-dvl').textContent=(sensors.dvl&&sensors.dvl.updates_applied!=null?sensors.dvl.updates_applied:0)+' upd';
+  document.getElementById('health-mag').textContent=healthAge(sensors.magnetometer);
+  var reasons=d.estimator&&Array.isArray(d.estimator.uncertainty_reasons)?d.estimator.uncertainty_reasons:[];
+  document.getElementById('uncertainty-reasons').textContent=reasons.length?reasons.join(' | '):'No uncertainty drivers reported';
+  if(sensors.dvl)updateDvlStatus(sensors.dvl);
+}
+function fetchHealth(){fetch('/api/health').then(function(r){return r.json();}).then(updateHealth).catch(function(){});}
+function setMode(mode){fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})}).then(function(r){return r.json();}).then(function(){fetchHealth();checkGpsDenialStatus();}).catch(function(){});}
+function resetEstimator(){fetch('/api/estimator/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clear_buffers:false,clear_track:false,clear_events:false})}).then(function(r){return r.json();}).then(function(){fetchHealth();fetchDvlStatus();}).catch(function(){});}
+function saveConfig(){fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:{mode:document.getElementById('mode-select').value,magnetometer:{enabled:magCorrection}}})}).then(function(){showToast('Configuration saved');}).catch(function(){});}
+function updateCalibration(d){if(!d)return;var field=document.getElementById('mag-field'),offset=document.getElementById('mag-offset');if(field&&d.expected_field_magnitude_uT!=null)field.textContent=Number(d.expected_field_magnitude_uT).toFixed(1);if(offset&&Array.isArray(d.hard_iron_offset_uT))offset.textContent=d.hard_iron_offset_uT.map(function(v){return Number(v).toFixed(1);}).join(',');}
+function fetchCalibration(){fetch('/api/calibration/magnetometer').then(function(r){return r.json();}).then(updateCalibration).catch(function(){});}
+function captureMagCalibration(){fetch('/api/calibration/magnetometer/capture',{method:'POST'}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||'Capture failed');});return r.json();}).then(function(d){updateCalibration(d);showToast('Mag calibration captured');}).catch(function(err){showToast(err.message);});}
+function updateEvents(events){var el=document.getElementById('event-log');if(!el)return;if(!events||!events.length){el.textContent='No events';return;}el.innerHTML=events.slice(-8).reverse().map(function(e){var t=new Date((e.timestamp||0)*1000).toLocaleTimeString();var color=e.severity==='warning'?'#d4a000':e.severity==='error'?'#d44040':'#7a8aa0';return'<div><span style="color:'+color+'">'+t+'</span> '+e.message+'</div>';}).join('');}
+function fetchEvents(){fetch('/api/events?limit=20').then(function(r){return r.json();}).then(updateEvents).catch(function(){});}
+function updateRecordingList(d){var el=document.getElementById('recording-list');if(!el)return;var list=d&&d.recordings?d.recordings:[];if(!list.length){el.textContent='No saved recordings';return;}el.innerHTML=list.slice(0,3).map(function(r){return'<div>'+r.id+' | '+(r.frame_count||0)+' frames</div>';}).join('');}
+function fetchRecordingList(){fetch('/api/recording/list').then(function(r){return r.json();}).then(updateRecordingList).catch(function(){});}
+function toggleTracks(){showTracks=!showTracks;refreshTrack();refreshV2Track();}
+function toggleUncertainty(){showUncertainty=!showUncertainty;if(!showUncertainty){clearNavUncertainty();if(uncertaintyEllipse){map.removeLayer(uncertaintyEllipse);uncertaintyEllipse=null;}}else{updateNavUncertainty(state.lat,state.lon,{ellipse:null,uncertainty_ellipse:null});if(gpsDenied)fetchDeadReckon();}}
+function toggleSupport(){showSupport=!showSupport;if(!showSupport){if(vessel2Marker){map.removeLayer(vessel2Marker);vessel2Marker=null;}if(vessel2TrackPolyline){map.removeLayer(vessel2TrackPolyline);vessel2TrackPolyline=null;}}else if(v2.lat!=null){updateVessel2Marker(v2.lat,v2.lon,v2.heading);refreshV2Track();}}
 function setGpsDeniedState(denied){
   if(gpsDenied===denied){
     return;
@@ -389,7 +455,7 @@ function clearNavUncertainty(){
   if(navUncertaintyEllipse){map.removeLayer(navUncertaintyEllipse);navUncertaintyEllipse=null;}
 }
 function updateNavUncertainty(lat,lon,d){
-  if(gpsDenied||lat==null||lon==null){clearNavUncertainty();return;}
+  if(!showUncertainty||gpsDenied||lat==null||lon==null){clearNavUncertainty();return;}
   var ell=d&&d.ellipse?d.ellipse:null;
   var legacy=d&&d.uncertainty_ellipse?d.uncertainty_ellipse:null;
   var major=ell&&ell.semi_major_m!=null?ell.semi_major_m:(legacy?legacy.semi_major:null);
@@ -432,7 +498,7 @@ function updateDRVisualization(d){
   }
 
   // Uncertainty ellipse
-  if(ell&&ell.semi_major>0){
+  if(showUncertainty&&ell&&ell.semi_major>0){
     var pts=ellipsePolygon(drLat,drLon,ell.semi_major,ell.semi_minor,ell.angle_deg,64);
     if(!uncertaintyEllipse){uncertaintyEllipse=L.polygon(pts,{color:'#f0c040',weight:1.5,dashArray:'4,6',fillColor:'rgba(240,192,64,0.15)',fillOpacity:1,opacity:0.7}).addTo(map);}
     else{uncertaintyEllipse.setLatLngs(pts);}
@@ -476,14 +542,15 @@ if(state.follow)map.panTo([lat,lon],{animate:true,duration:0.3});
 }
 
 function updateVessel2Marker(lat,lon,heading){
+if(!showSupport){if(vessel2Marker){map.removeLayer(vessel2Marker);vessel2Marker=null;}return;}
 if(!vessel2Marker){vessel2Marker=L.marker([lat,lon],{icon:createVessel2Icon(heading),zIndexOffset:999}).addTo(map);
 vessel2Marker.on('click',function(){var hdg=(v2.heading!=null&&!isNaN(v2.heading))?v2.heading.toFixed(1)+'&deg;':'---';var spd=(v2.speed!=null)?v2.speed.toFixed(1)+' kn':'---';vessel2Marker.bindPopup('<span style="color:#7fb3d5">Support Vessel</span><br>Lat: '+v2.lat.toFixed(6)+'<br>Lon: '+v2.lon.toFixed(6)+'<br>Speed: '+spd+'<br>Heading: '+hdg).openPopup();});}
 else{vessel2Marker.setLatLng([lat,lon]);}
 }
 
-function refreshTrack(){if(state.trackPoints.length===0){if(trackPolyline){map.removeLayer(trackPolyline);trackPolyline=null;}return;}
+function refreshTrack(){if(!showTracks||state.trackPoints.length===0){if(trackPolyline){map.removeLayer(trackPolyline);trackPolyline=null;}return;}
 if(!trackPolyline){trackPolyline=L.polyline(state.trackPoints,{color:'#00d4aa',weight:2,opacity:0.7}).addTo(map);}else{trackPolyline.setLatLngs(state.trackPoints);}}
-function refreshV2Track(){if(v2.trackPoints.length===0){if(vessel2TrackPolyline){map.removeLayer(vessel2TrackPolyline);vessel2TrackPolyline=null;}return;}
+function refreshV2Track(){if(!showTracks||!showSupport||v2.trackPoints.length===0){if(vessel2TrackPolyline){map.removeLayer(vessel2TrackPolyline);vessel2TrackPolyline=null;}return;}
 if(!vessel2TrackPolyline){vessel2TrackPolyline=L.polyline(v2.trackPoints,{color:'#7fb3d5',weight:2,opacity:0.55}).addTo(map);}else{vessel2TrackPolyline.setLatLngs(v2.trackPoints);}}
 function appendTrackPoint(lat,lon){state.trackPoints.push([lat,lon]);if(state.trackPoints.length>2000)state.trackPoints.splice(0,state.trackPoints.length-2000);refreshTrack();}
 function appendV2TrackPoint(lat,lon){v2.trackPoints.push([lat,lon]);if(v2.trackPoints.length>2000)v2.trackPoints.splice(0,v2.trackPoints.length-2000);refreshV2Track();}
@@ -511,7 +578,7 @@ function startReconnect(){stopReconnectTimers();var cd=3;document.getElementById
 
 // Recording
 function toggleRecording(){
-if(recording){fetch('/api/recording/stop').catch(function(){});recording=false;if(recTimer){clearInterval(recTimer);recTimer=null;}
+if(recording){fetch('/api/recording/stop').then(function(){fetchRecordingList();}).catch(function(){});recording=false;if(recTimer){clearInterval(recTimer);recTimer=null;}
 document.getElementById('rec-btn').className='';document.getElementById('rec-btn').textContent='● Record';document.getElementById('rec-status').textContent='Stopped';document.getElementById('rec-time').style.display='none';document.getElementById('rec-badge').className='';}
 else{fetch('/api/recording/start').catch(function(){});recording=true;recStartTime=Date.now();document.getElementById('rec-btn').className='recording';document.getElementById('rec-btn').textContent='● Stop';document.getElementById('rec-status').textContent='Recording';document.getElementById('rec-time').style.display='';document.getElementById('rec-time').textContent='00:00';document.getElementById('rec-badge').className='visible';recTimer=setInterval(function(){document.getElementById('rec-time').textContent=fmtDuration(Date.now()-recStartTime);},200);}
 }
@@ -543,12 +610,20 @@ function focusPlannerRoute(){if(plannerRouteLine&&plannerRouteLine.getBounds().i
 Object.assign(window,{
   toggleGpsDenial:toggleGpsDenial,
   toggleMagCorrection:toggleMagCorrection,
+  setMode:setMode,
+  resetEstimator:resetEstimator,
+  saveConfig:saveConfig,
+  fetchCalibration:fetchCalibration,
+  captureMagCalibration:captureMagCalibration,
   toggleRecording:toggleRecording,
   startReplay:startReplay,
   stopReplay:stopReplay,
   setReplaySpeed:setReplaySpeed,
   exportGeoJSON:exportGeoJSON,
   exportCSV:exportCSV,
+  toggleTracks:toggleTracks,
+  toggleUncertainty:toggleUncertainty,
+  toggleSupport:toggleSupport,
   openPlanner:openPlanner,
   closePlanner:closePlanner,
   clearPlannerRoute:clearPlannerRoute,
@@ -581,7 +656,8 @@ switch(data.type){
 case'history':var hd=data.data;if(hd){if(hd.gps&&hd.gps.length){var g=hd.gps[hd.gps.length-1];state.lat=g.lat;state.lon=g.lon;state.speed=g.speed_kn||0;state.heading=g.heading_deg!=null?g.heading_deg:null;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,g);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);}if(hd.pressure&&hd.pressure.length){var p=hd.pressure[hd.pressure.length-1];if(p.depth_m!=null)updateDepth(p.depth_m);}if(hd.barometer&&hd.barometer.length){var b=hd.barometer[hd.barometer.length-1];if(b.pressure_hpa!=null)updateBarometer(b.pressure_hpa);}}break;
 case'gps':if(data.lat!=null&&data.lon!=null){if(isV2){v2.lat=data.lat;v2.lon=data.lon;v2.heading=data.heading_deg!=null?data.heading_deg:v2.heading;v2.speed=data.speed_kn!=null?data.speed_kn:v2.speed;updateVessel2Marker(v2.lat,v2.lon,v2.heading);appendV2TrackPoint(v2.lat,v2.lon);}else{state.lat=data.lat;state.lon=data.lon;state.heading=data.heading_deg!=null?data.heading_deg:state.heading;state.speed=data.speed_kn!=null?data.speed_kn:state.speed;updateVesselMarker(state.lat,state.lon,state.heading);updateNavUncertainty(state.lat,state.lon,data);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);appendTrackPoint(state.lat,state.lon);drawCompass(state.heading);}updateFleetPanel();}break;
 case'dead_reckon':updateDRVisualization(data);break;
-case'dvl':fetchDvlStatus();break;
+case'dvl':fetchDvlStatus();fetchHealth();break;
+case'event':fetchEvents();break;
 case'pressure':if(data.depth_m!=null)updateDepth(data.depth_m);break;
 case'barometer':if(data.pressure_hpa!=null)updateBarometer(data.pressure_hpa);break;
 }};
@@ -640,7 +716,7 @@ function checkGpsDenialStatus(){
 }
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closePlanner();});
 // Init
-document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);fetchMagCorrection();fetchDvlStatus();setInterval(fetchDvlStatus,5000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
+document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);fetchMagCorrection();fetchCalibration();fetchDvlStatus();fetchHealth();fetchEvents();fetchRecordingList();setInterval(fetchDvlStatus,5000);healthTimer=setInterval(fetchHealth,3000);eventTimer=setInterval(fetchEvents,5000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
 });
 })();
 </script>
