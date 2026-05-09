@@ -1,92 +1,71 @@
-# Rust build artifacts
-target/
-**/target/
-
-# Rustfmt backup files
-*.rs.bk
-
-# Compiled object/library files (in case anyone builds outside cargo)
-*.o
-*.a
-*.so
-*.dylib
-*.rlib
-
+!.env.example
 # Cargo.lock — committed for binaries, ignored for pure libraries.
-# The Rust team's current guidance (2023+) is to commit Cargo.lock for
-# applications and leave it for libraries to the maintainer's discretion.
-# This repo currently contains a library crate (`imu-drift`); flip this
-# line if you publish a binary or want fully reproducible CI builds.
-#Cargo.lock
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Linux
-*~
-.fuse_hidden*
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
+# Compiled object/library files (in case anyone builds outside cargo)
+# Coverage / profiling output
+# Documentation build output
 # Editors / IDEs
-.vscode/
-.idea/
-*.iml
-*.swp
-*.swo
-.nvim.lua
-.helix/
-
 # Environment / secrets — never commit these
+# Environments
+# Linux
+# Node (likewise)
+# Python (in case any tooling scripts land here later)
+# Python bytecode
+# Rust build artifacts
+# Rustfmt backup files
+# Testing & Coverage
+# The Rust team's current guidance (2023+) is to commit Cargo.lock for
+# This repo currently contains a library crate (`imu-drift`); flip this
+# Tool specific
+# Windows
+# applications and leave it for libraries to the maintainer's discretion.
+# line if you publish a binary or want fully reproducible CI builds.
+# macOS
+#Cargo.lock
+**/target/
+*.a
+*.dylib
+*.egg-info/
+*.iml
+*.key
+*.o
+*.pem
+*.profdata
+*.profraw
+*.py[cod]
+*.rlib
+*.rs.bk
+*.so
+*.swo
+*.swp
+*~
+.AppleDouble
+.DS_Store
+.LSOverride
+.claude-flow/
+.coverage
 .env
 .env.*
-!.env.example
-*.pem
-*.key
-
-# Coverage / profiling output
-*.profraw
-*.profdata
-tarpaulin-report.html
-cobertura.xml
-lcov.info
-
-# Documentation build output
-/book/
-target/doc/
-
-# Python (in case any tooling scripts land here later)
-__pycache__/
-*.py[cod]
-.venv/
+.fuse_hidden*
+.helix/
+.idea/
 .mypy_cache/
+.nvim.lua
 .pytest_cache/
 .ruff_cache/
-build/
-dist/
-*.egg-info/
-
-# Node (likewise)
-node_modules/
-
-
-
-# Environments
-venv/
-.env
-
-# Testing & Coverage
-.coverage
-htmlcov/
-
-# Tool specific
-.claude-flow/
-
-# Python bytecode
+.venv/
+.vscode/
+/book/
+Desktop.ini
+Thumbs.db
 __pycache__/
-*.py[cod]
+build/
+cobertura.xml
+dist/
+ehthumbs.db
+htmlcov/
+lcov.info
+node_modules/
+target/
+target/doc/
+tarpaulin-report.html
+venv/
