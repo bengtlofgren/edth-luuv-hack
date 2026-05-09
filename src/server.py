@@ -58,6 +58,9 @@ SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
+SIMULATOR_DISABLED = os.environ.get(
+    "DISABLE_SIMULATOR", os.environ.get("SIMULATOR_DISABLED", "")
+).lower() in {"1", "true", "yes", "on"}
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -173,6 +176,7 @@ class AppState:
         # Real data replay
         self.replay: SimrisReplay = SimrisReplay()
         self.replay_task: asyncio.Task[None] | None = None
+        self.replay_speed: float = 1.0
         self.dr_last_gps_speed_kn: float = 0.0
 
         # Magnetometer calibration
@@ -639,10 +643,20 @@ async def export_csv():
 @app.post("/api/replay/start")
 async def replay_start(speed: float = 1.0):
     """Start replaying the Simris field dataset at the given speed multiplier."""
+    if state.replay_task is not None:
+        state.replay.stop()
+        state.replay_task.cancel()
+        try:
+            await state.replay_task
+        except asyncio.CancelledError:
+            pass
+        state.replay_task = None
+    state.replay_speed = max(speed, 0.01)
     state.replay = SimrisReplay()
     state.replay.running = True
+    state.replay.speed = state.replay_speed
     async def _run():
-        await _replay_runner(state.replay, speed=speed)
+        await _replay_runner(state.replay, speed=state.replay_speed)
     state.replay_task = asyncio.create_task(_run())
     return {"status": "running"}
 
@@ -665,6 +679,14 @@ async def replay_stop():
 async def replay_status():
     """Return current replay status."""
     return state.replay.get_status()
+
+
+@app.post("/api/replay/speed")
+async def replay_speed(multiplier: float = 1.0):
+    """Adjust the active replay speed multiplier."""
+    state.replay_speed = max(multiplier, 0.01)
+    state.replay.speed = state.replay_speed
+    return {"status": "ok", "speed": state.replay_speed}
 
 # ---------------------------------------------------------------------------
 # GPS Denial & Dead Reckoning

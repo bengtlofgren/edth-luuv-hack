@@ -422,7 +422,7 @@ else{fetch('/api/recording/start').catch(function(){});recording=true;recStartTi
 
 // Replay
 function startReplay(){if(showingReplay)return;fetch('/api/replay/start',{method:'POST'}).then(function(){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}).catch(function(){});}
-function pollReplayStatus(){if(!showingReplay)return;fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){var p=d.progress||0;document.getElementById('replay-progress').style.width=Math.min(p*100,100)+'%';document.getElementById('replay-time').textContent=fmtDuration(d.elapsed_ms||0)+' / '+fmtDuration(d.duration_ms||0);setTimeout(pollReplayStatus,500);}else{stopReplay();}}).catch(function(){setTimeout(pollReplayStatus,1000);});}
+function pollReplayStatus(){if(!showingReplay)return;fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active||d.running){var p=d.progress||0;document.getElementById('replay-progress').style.width=Math.min(p,100)+'%';document.getElementById('replay-time').textContent=fmtDuration(d.elapsed_ms||0)+' / '+fmtDuration(d.duration_ms||0);setTimeout(pollReplayStatus,500);}else{stopReplay();}}).catch(function(){setTimeout(pollReplayStatus,1000);});}
 function pauseReplay(){stopReplay();}
 function stopReplay(){showingReplay=false;fetch('/api/replay/stop',{method:'POST'}).catch(function(){});updateDataSource();document.getElementById('replay-badge').style.display='none';}
 function seekReplay(val){}
@@ -433,6 +433,16 @@ function updateDataSource(){var el=document.getElementById('data-source');var si
 function triggerDownload(url,name){fetch(url).then(function(r){return r.blob();}).then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}).catch(function(){});}
 function exportGeoJSON(){triggerDownload('/api/export/geojson','mission_tracks.geojson');}
 function exportCSV(){triggerDownload('/api/export/csv','mission_data.csv');}
+
+Object.assign(window,{
+  toggleGpsDenial:toggleGpsDenial,
+  toggleRecording:toggleRecording,
+  startReplay:startReplay,
+  stopReplay:stopReplay,
+  setReplaySpeed:setReplaySpeed,
+  exportGeoJSON:exportGeoJSON,
+  exportCSV:exportCSV
+});
 
 // Tile layers
 var baseLayers={};var overlays={};var currentBase='seabed';
@@ -476,11 +486,11 @@ baseCtrl.onAdd=function(){var div=L.DomUtil.create('div','leaflet-bar layer-ctrl
 baseCtrl.addTo(map);
 setTimeout(function(){document.querySelectorAll('.map-btn-base').forEach(function(b){b.addEventListener('click',function(){switchBase(this.getAttribute('data-layer'));});});document.querySelectorAll('.map-btn-overlay').forEach(function(b){b.addEventListener('click',function(){toggleOverlay(this.getAttribute('data-layer'));});});},0);
 
-var followCtrl=L.control({position:'topright'});
+var followCtrl=L.control({position:'topleft'});
 followCtrl.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn follow-btn');btn.innerHTML='Follow: OFF';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){state.follow=!state.follow;btn.innerHTML='Follow: '+(state.follow?'ON':'OFF');btn.classList.toggle('active',state.follow);if(state.follow&&vesselMarker)map.panTo(vesselMarker.getLatLng(),{animate:true,duration:0.3});});return btn;};
 followCtrl.addTo(map);
 
-var wpEditBtn=L.control({position:'topright'});
+var wpEditBtn=L.control({position:'topleft'});
 wpEditBtn.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn');btn.innerHTML='+ WP';btn.title='Toggle waypoint placement mode';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){wpMode=!wpMode;btn.classList.toggle('active',wpMode);btn.innerHTML=wpMode?'+ WP ON':'+ WP';map.getContainer().style.cursor=wpMode?'crosshair':'';});return btn;};
 wpEditBtn.addTo(map);
 

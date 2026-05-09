@@ -5,22 +5,56 @@ on:
   pull_request:
 
 jobs:
-  unit-tests:
+  python-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install package
-        run: python -m pip install .
-        working-directory: dvl_correction
-      - name: Compile sources
-        run: python -m compileall -q src tests
-        working-directory: dvl_correction
-      - name: Run tests
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e ./dvl_correction
+      - name: Compile Python sources
+        run: python -m compileall -q dvl_correction/src dvl_correction/tests src tests
+      - name: Run DVL tests
         run: python -m unittest discover -s tests
         working-directory: dvl_correction
+      - name: Run command-center tests
+        run: DISABLE_SIMULATOR=1 python -m pytest tests -q
       - name: Smoke CLI
         run: edth-luuv-fuse --help
         working-directory: dvl_correction
+
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test IMU drift
+        run: |
+          cargo test --locked
+          cargo test --locked --features sample
+        working-directory: imu-drift
+      - name: Test WebSocket server
+        run: cargo test --locked
+        working-directory: frontend/server
+
+  web-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/web/package-lock.json
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: frontend/web
+      - name: Typecheck web app
+        run: npm run typecheck
+        working-directory: frontend/web
+      - name: Build web app
+        run: npm run build
+        working-directory: frontend/web

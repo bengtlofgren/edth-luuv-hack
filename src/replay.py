@@ -12,6 +12,22 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_data_dir(data_dir: str) -> Path:
+    """Resolve bundled replay data even when callers pass stale absolute paths."""
+    candidate = Path(data_dir)
+    if (candidate / "gps.log").exists() and (candidate / "imu.log").exists():
+        return candidate
+
+    bundled = PROJECT_ROOT / candidate.name
+    if (bundled / "gps.log").exists() and (bundled / "imu.log").exists():
+        return bundled
+
+    return candidate
+
+
 def parse_gps_log(path: str) -> list[dict[str, Any]]:
     """Parse simris_2min/gps.log into list of GPS events."""
     events: list[dict[str, Any]] = []
@@ -83,7 +99,7 @@ class SimrisReplay:
     """
 
     def __init__(self, data_dir: str = "simris_2min"):
-        base = Path(data_dir)
+        base = _resolve_data_dir(data_dir)
         self.gps_events = parse_gps_log(str(base / "gps.log"))
         self.imu_events = parse_imu_log(str(base / "imu.log"))
 
@@ -101,6 +117,7 @@ class SimrisReplay:
         self.running = False
         self.progress = 0.0
         self.current_rel_time = 0.0
+        self.speed = 1.0
         self._task: asyncio.Task[None] | None = None
 
         # Starting position (for map centering)
@@ -137,6 +154,7 @@ class SimrisReplay:
 
         self.running = True
         self.progress = 0.0
+        self.speed = speed
 
         start_wall = time.monotonic()
         first_rel = self.timeline[0][0]
@@ -148,7 +166,8 @@ class SimrisReplay:
             # Maintain real-time spacing (adjusted for speed)
             elapsed = time.monotonic() - start_wall
             target_offset = rel_t - first_rel
-            delay = target_offset / speed - elapsed
+            current_speed = max(self.speed, 0.01)
+            delay = target_offset / current_speed - elapsed
             if delay > 0:
                 await asyncio.sleep(delay)
 
@@ -185,11 +204,18 @@ class SimrisReplay:
 
     def get_status(self) -> dict[str, Any]:
         """Return current replay status."""
+        duration_s = 0.0
+        if self.timeline:
+            duration_s = self.timeline[-1][0] - self.timeline[0][0]
         return {
             "running": self.running,
+            "active": self.running,
             "progress": round(self.progress, 1),
             "total_events": self.total_events,
             "current_rel_time": round(self.current_rel_time, 1),
+            "elapsed_ms": round(self.current_rel_time * 1000),
+            "duration_ms": round(duration_s * 1000),
+            "speed": self.speed,
             "start_lat": self.start_lat,
             "start_lon": self.start_lon,
         }
