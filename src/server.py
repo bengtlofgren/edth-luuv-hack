@@ -7,19 +7,30 @@ track history, state endpoint, and static file serving.
 """
 
 import asyncio
+import io
 import math
+import sys
+from pathlib import Path
+
+# When run directly, need project root on path for 'src' package access
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+try:
+    from src.bathymetry import get_depth, grid_info
+except ImportError:
+    from bathymetry import get_depth, grid_info  # fallback for pytest from src/
 import os
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Any
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -38,14 +49,21 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 SENSOR_NAMES = {"accelerometer", "magnetometer", "gyroscope", "orientation", "barometer"}
 
-# Simulated survey pattern (Oslofjord area)
-BASE_LAT = 59.4370
-BASE_LON = 10.6550
+# Simulated survey pattern (Karlskrona archipelago — Aspöfjärden)
+BASE_LAT = 56.1300
+BASE_LON = 15.5800
 SURVEY_SPEED_MS = 2.0          # m/s
 SURVEY_LEG_LENGTH = 200.0      # metres per long leg
 SURVEY_LEG_SPACING = 20.0      # metres between passes
 SURVEY_HEADINGS = (90.0, 0.0, 270.0, 180.0)  # east, north, west, south
 
+# Support vessel (vessel2) figure-8 holding pattern
+V2_CENTER_LAT = BASE_LAT + 0.004
+V2_CENTER_LON = BASE_LON + 0.004
+V2_RADIUS_LAT = 0.0009
+V2_RADIUS_LON = 0.0016
+V2_SPEED_MS = 1.5
+V2_OMEGA = 0.015
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -72,6 +90,23 @@ class PressureData(BaseModel):
     pressure_bar: float | None = None
 
 
+class WaypointIn(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+    name: str | None = None
+
+
+class RiskSegment(BaseModel):
+    from_id: int
+    to_id: int
+    from_name: str | None
+    to_name: str | None
+    distance_m: float
+    risk_score: float
+    factors: dict[str, float]
+    heading_error_deg: float
+    avg_depth_m: float | None
+
 # ---------------------------------------------------------------------------
 # Application state
 # ---------------------------------------------------------------------------
@@ -85,6 +120,28 @@ class AppState:
         self.simulator_task: asyncio.Task[None] | None = None
         self.track_buffer: deque[dict[str, Any]] = deque(maxlen=2000)
 
+        # Waypoints & IMU drift tracking
+        self.waypoints: list[dict[str, Any]] = []
+        self.waypoint_next_id: int = 1
+        self.last_gps_time: float | None = None
+        self.gyro_z_samples: deque[float] = deque(maxlen=300)
+        self.accel_mags: deque[float] = deque(maxlen=300)
+        self.gyro_z_bias: float = 0.0
+        self.accel_variance: float = 0.0
+        self.drift_rate_dps: float = 0.0
+
+        # Second vessel (support ship)
+        self.vessel2_lat: float = V2_CENTER_LAT
+        self.vessel2_lon: float = V2_CENTER_LON
+        self.vessel2_heading: float = 0.0
+        self.vessel2_speed: float = 1.5
+        self.vessel2_track: deque[dict[str, Any]] = deque(maxlen=200)
+
+        # Mission recording
+        self.recording: bool = False
+        self.recorded_frames: list[dict[str, Any]] = []
+        self.recording_start_time: float = 0.0
+        self.last_record_time: float = 0.0
 
 state = AppState()
 
@@ -117,6 +174,18 @@ def _last_ts(name: str) -> float:
     return state.buffers[name][-1]["timestamp"]
 
 
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R, p1, p2 = 6371000.0, math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _recalc_drift() -> None:
+    """Recalculate drift rate from current gyro bias and accelerometer noise."""
+    nf = 1.0 + (math.sqrt(state.accel_variance) / 9.81 if state.accel_variance > 0 else 0)
+    state.drift_rate_dps = abs(state.gyro_z_bias) * (180.0 / math.pi) * nf
+
+
 # ---------------------------------------------------------------------------
 # Lifespan (start / stop simulator)
 # ---------------------------------------------------------------------------
@@ -125,6 +194,12 @@ def _last_ts(name: str) -> float:
 async def lifespan(application: FastAPI):  # noqa: ARG001
     if not SIMULATOR_DISABLED:
         state.simulator_task = asyncio.create_task(_simulator_loop())
+        state.waypoints = [
+            {"id": 1, "lat": BASE_LAT, "lon": BASE_LON, "name": "A", "depth_m": round(get_depth(BASE_LAT, BASE_LON) or 0, 1)},
+            {"id": 2, "lat": BASE_LAT, "lon": BASE_LON + 0.008, "name": "B", "depth_m": round(get_depth(BASE_LAT, BASE_LON + 0.008) or 0, 1)},
+            {"id": 3, "lat": BASE_LAT + 0.005, "lon": BASE_LON + 0.008, "name": "C", "depth_m": round(get_depth(BASE_LAT + 0.005, BASE_LON + 0.008) or 0, 1)},
+        ]
+        state.waypoint_next_id = 4
     yield
     if state.simulator_task is not None:
         state.simulator_task.cancel()
@@ -132,7 +207,6 @@ async def lifespan(application: FastAPI):  # noqa: ARG001
             await state.simulator_task
         except asyncio.CancelledError:
             pass
-
 
 # ---------------------------------------------------------------------------
 # FastAPI application
@@ -148,7 +222,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ---------------------------------------------------------------------------
 # WebSocket broadcast helper
 # ---------------------------------------------------------------------------
@@ -163,7 +236,6 @@ async def _broadcast(message: dict[str, Any]) -> None:
             stale.append(ws)
     for ws in stale:
         state.websockets.discard(ws)
-
 
 # ---------------------------------------------------------------------------
 # REST endpoints
@@ -182,8 +254,18 @@ async def post_data(data: DataPayload):
             **sensor.values,
             "timestamp": _last_ts(sensor.name),
         })
+        if sensor.name == "gyroscope" and "z" in sensor.values:
+            state.gyro_z_samples.append(sensor.values["z"])
+            state.gyro_z_bias = sum(state.gyro_z_samples) / len(state.gyro_z_samples)
+            _recalc_drift()
+        if sensor.name == "accelerometer":
+            mag = math.sqrt(sensor.values.get("x", 0)**2 + sensor.values.get("y", 0)**2 + sensor.values.get("z", 0)**2)
+            state.accel_mags.append(mag)
+            if len(state.accel_mags) > 1:
+                m = sum(state.accel_mags) / len(state.accel_mags)
+                state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
+            _recalc_drift()
     return {"status": "ok"}
-
 
 @app.post("/gps")
 async def post_gps(data: GpsData):
@@ -209,8 +291,8 @@ async def post_gps(data: GpsData):
         "speed_kn": data.speed_kn,
         "heading_deg": data.heading_deg,
     })
+    state.last_gps_time = _now()
     return {"status": "ok"}
-
 
 @app.post("/pressure")
 async def post_pressure(data: PressureData):
@@ -229,21 +311,19 @@ async def post_pressure(data: PressureData):
     })
     return {"status": "ok"}
 
-
 # ---------------------------------------------------------------------------
 # State & Track endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/api/state")
 async def get_api_state():
-    """Return the latest vessel state from GPS and pressure buffers."""
+    """Return the latest vessel state from GPS, pressure, and vessel2."""
     result: dict[str, Any] = {
-        "lat": None,
-        "lon": None,
-        "speed_kn": None,
-        "heading_deg": None,
-        "depth_m": None,
-        "timestamp": None,
+        "lat": None, "lon": None, "speed_kn": None, "heading_deg": None,
+        "depth_m": None, "timestamp": None,
+        "vessel2_lat": state.vessel2_lat, "vessel2_lon": state.vessel2_lon,
+        "vessel2_heading_deg": state.vessel2_heading,
+        "vessel2_speed_kn": round(state.vessel2_speed * 1.94384, 1),
     }
     gps_buf = state.buffers.get("gps")
     if gps_buf:
@@ -258,7 +338,6 @@ async def get_api_state():
         last_pressure = pressure_buf[-1]
         result["depth_m"] = last_pressure.get("depth_m")
     return result
-
 
 @app.get("/api/track")
 async def get_api_track():
@@ -284,30 +363,191 @@ async def get_api_track():
     }
 
 
+@app.get("/api/depth")
+async def get_api_depth(lat: float, lon: float):
+    """Return seabed depth (meters) at a geographic point.
+
+    Query params: ``lat`` (float), ``lon`` (float).
+    Returns ``{"lat": 59.4, "lon": 10.6, "depth_m": 123.4}``
+    or ``{"lat": 59.4, "lon": 10.6, "depth_m": null}`` for land / out-of-bounds.
+    """
+    depth = get_depth(lat, lon)
+    return {"lat": lat, "lon": lon, "depth_m": depth}
+
+
+@app.get("/api/bathymetry/info")
+async def get_api_bathymetry_info():
+    """Return metadata about the bathymetry grid."""
+    return grid_info()
+
+
+# ---------------------------------------------------------------------------
+# Waypoints API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/waypoints")
+async def create_waypoint(wp: WaypointIn):
+    depth = get_depth(wp.lat, wp.lon)
+    if depth is None or depth < 2.0:
+        raise HTTPException(
+            status_code=400,
+            detail="Waypoint on land, too shallow, or outside chart area — USV requires water depth ≥ 2 m",
+        )
+    entry = {
+        "id": state.waypoint_next_id,
+        "lat": wp.lat,
+        "lon": wp.lon,
+        "name": wp.name,
+        "depth_m": round(depth, 1),
+    }
+    state.waypoint_next_id += 1
+    state.waypoints.append(entry)
+    return entry
+
+
+@app.get("/api/waypoints")
+async def list_waypoints():
+    return list(state.waypoints)
+
+@app.delete("/api/waypoints/{wp_id}")
+async def delete_waypoint(wp_id: int):
+    for i, wp in enumerate(state.waypoints):
+        if wp["id"] == wp_id:
+            state.waypoints.pop(i)
+            return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Waypoint not found")
+
+# ---------------------------------------------------------------------------
+# Risk assessment API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/risk")
+async def get_risk():
+    now = _now()
+    gps_age = (now - state.last_gps_time) if state.last_gps_time is not None else 9999.0
+    speed = SURVEY_SPEED_MS
+    gps_buf = state.buffers.get("gps")
+    if gps_buf and gps_buf[-1].get("speed_kn"):
+        speed = gps_buf[-1]["speed_kn"] * 0.514444
+
+    segments = []
+    for i in range(len(state.waypoints) - 1):
+        wp1, wp2 = state.waypoints[i], state.waypoints[i + 1]
+        d = _haversine(wp1["lat"], wp1["lon"], wp2["lat"], wp2["lon"])
+        travel_time = d / max(speed, 0.1)
+        heading_error = state.drift_rate_dps * travel_time
+        mid_lat = (wp1["lat"] + wp2["lat"]) / 2
+        mid_lon = (wp1["lon"] + wp2["lon"]) / 2
+        depth = get_depth(mid_lat, mid_lon) or 50.0
+        risk_drift = min(heading_error / 30.0, 1.0)
+        risk_gps = 1.0 - math.exp(-gps_age / 120.0)
+        risk_distance = min(d / 2000.0, 1.0)
+        risk_depth = math.exp(-depth / 15.0)
+        risk_score = 0.35 * risk_drift + 0.30 * risk_gps + 0.15 * risk_distance + 0.20 * risk_depth
+        risk_score = max(0.0, min(1.0, risk_score))
+        segments.append({
+            "from_id": wp1["id"],
+            "to_id": wp2["id"],
+            "from_name": wp1.get("name"),
+            "to_name": wp2.get("name"),
+            "distance_m": round(d, 1),
+            "risk_score": round(risk_score, 3),
+            "factors": {
+                "drift": round(risk_drift, 3),
+                "gps": round(risk_gps, 3),
+                "distance": round(risk_distance, 3),
+                "depth": round(risk_depth, 3),
+            },
+            "heading_error_deg": round(heading_error, 2),
+            "avg_depth_m": round(depth, 1),
+        })
+
+    mission_risk = max((s["risk_score"] for s in segments), default=0.0)
+    return {
+        "segments": segments,
+        "mission_risk": mission_risk,
+        "imu": {
+            "drift_rate_dps": round(state.drift_rate_dps, 4),
+            "gyro_bias_dps": round(state.gyro_z_bias * (180.0 / math.pi), 4),
+            "accel_variance": round(state.accel_variance, 4),
+            "last_gps_sec": round(gps_age, 1),
+        },
+    }
+
+
+@app.get("/api/recording/start")
+async def recording_start():
+    state.recording = True; state.recorded_frames = []
+    state.recording_start_time = state.last_record_time = _now()
+    return {"status": "recording"}
+
+
+@app.get("/api/recording/stop")
+async def recording_stop():
+    state.recording = False
+    n = len(state.recorded_frames)
+    dur = _now() - state.recording_start_time
+    return {"frames": n, "duration_sec": round(dur, 1)}
+
+
+@app.get("/api/recording/status")
+async def recording_status():
+    elapsed = _now() - state.recording_start_time if state.recording else 0.0
+    return {"recording": state.recording, "frames": len(state.recorded_frames), "elapsed_sec": round(elapsed, 1)}
+
+
+@app.get("/api/recording/playback")
+async def recording_playback(start: int = 0, end: int | None = None):
+    if end is None:
+        end = len(state.recorded_frames)
+    return state.recorded_frames[start:end]
+
+
+@app.get("/api/export/geojson")
+async def export_geojson():
+    features = []
+    if state.track_buffer:
+        features.append({
+            "type": "Feature", "geometry": {"type": "LineString",
+                "coordinates": [[e["lon"], e["lat"]] for e in state.track_buffer]},
+            "properties": {"vessel": "survey", "count": len(state.track_buffer)},
+        })
+    if state.vessel2_track:
+        features.append({
+            "type": "Feature", "geometry": {"type": "LineString",
+                "coordinates": [[e["lon"], e["lat"]] for e in state.vessel2_track]},
+            "properties": {"vessel": "support", "count": len(state.vessel2_track)},
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/api/export/csv")
+async def export_csv():
+    rows = ["timestamp,vessel,lat,lon,heading_deg,speed_kn,depth_m"]
+    rows += [f"{e.get('timestamp', '')},survey,{e['lat']},{e['lon']},{e.get('heading_deg', '')},{e.get('speed_kn', '')}," for e in state.track_buffer]
+    rows += [f"{e.get('timestamp', '')},support,{e['lat']},{e['lon']},{e.get('heading_deg', '')},{e.get('speed_kn', '')}," for e in state.vessel2_track]
+    return Response(content="\n".join(rows), media_type="text/csv")
+
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
-
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     state.websockets.add(ws)
-
-    # Send buffered history to the newly-connected client.
     history: dict[str, list[dict[str, Any]]] = {}
     for key, buf in state.buffers.items():
         if buf:
             history[key] = list(buf)
     await ws.send_json({"type": "history", "data": history})
-
     try:
         while True:
-            await ws.receive_text()  # keep connection alive
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
         state.websockets.discard(ws)
-
 
 # ---------------------------------------------------------------------------
 # Sensor simulator (background asyncio task)
@@ -337,6 +577,15 @@ async def _simulator_loop() -> None:
         roll_rate = 0.02 * math.sin(0.8 * t) + 0.01 * _smooth_noise(t, 4.0)
         pitch_rate = 0.015 * math.cos(0.6 * t) + 0.01 * _smooth_noise(t, 5.0)
         yaw_rate = 0.01 * math.sin(0.4 * t) + 0.005 * _smooth_noise(t, 6.0)
+
+        state.gyro_z_samples.append(yaw_rate)
+        state.gyro_z_bias = sum(state.gyro_z_samples) / len(state.gyro_z_samples)
+        acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
+        state.accel_mags.append(acc_mag)
+        if len(state.accel_mags) > 1:
+            m = sum(state.accel_mags) / len(state.accel_mags)
+            state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
+        _recalc_drift()
 
         roll = 5.0 * math.sin(0.1 * t)
         pitch = 3.0 * math.cos(0.08 * t)
@@ -375,15 +624,6 @@ async def _simulator_loop() -> None:
             "timestamp": _last_ts("barometer"),
         })
 
-        for sensor_name, values in imu_samples:
-            _buffer_sensor(sensor_name, values)
-            await _broadcast({
-                "type": "imu",
-                "sensor": sensor_name,
-                **values,
-                "timestamp": _last_ts(sensor_name),
-            })
-
         # ---- GPS: slow survey (lawnmower) pattern ----
         if phase == 0:       # east
             lon_off += step_m * 1.8e-5
@@ -420,10 +660,38 @@ async def _simulator_loop() -> None:
             "heading_deg": round(heading, 1),
         })
 
-        # ---- Pressure / depth ----
+        # ---- Vessel 2 (support) figure-8 holding pattern ----
+        cos_lat = math.cos(math.radians(BASE_LAT))
+        v2_angle = V2_OMEGA * sim_time
+        v2_lat = V2_CENTER_LAT + V2_RADIUS_LAT * math.sin(v2_angle)
+        v2_lon = V2_CENTER_LON + V2_RADIUS_LON * math.sin(2.0 * v2_angle)
+        v2_dlat = V2_RADIUS_LAT * V2_OMEGA * math.cos(v2_angle)
+        v2_dlon = V2_RADIUS_LON * 2.0 * V2_OMEGA * math.cos(2.0 * v2_angle)
+        v2_hdg = math.degrees(math.atan2(v2_dlon * cos_lat, v2_dlat)) % 360.0
+
+        state.vessel2_lat = round(v2_lat, 6)
+        state.vessel2_lon = round(v2_lon, 6)
+        state.vessel2_heading = round(v2_hdg, 1)
+        state.vessel2_speed = V2_SPEED_MS
+
+        await _broadcast({
+            "type": "gps",
+            "vessel": "support",
+            "lat": round(v2_lat, 6),
+            "lon": round(v2_lon, 6),
+            "speed_kn": round(V2_SPEED_MS * 1.94384, 1),
+            "heading_deg": round(v2_hdg, 1),
+            "timestamp": _last_ts("gps"),
+        })
+        state.vessel2_track.append({
+            "lat": round(v2_lat, 6),
+            "lon": round(v2_lon, 6),
+            "timestamp": _now(),
+            "speed_kn": round(V2_SPEED_MS * 1.94384, 1),
+            "heading_deg": round(v2_hdg, 1),
+        })
         depth = 5.0 + 3.0 * math.sin(0.03 * t)
         pressure_bar = round(depth * 0.0981 + 1.0, 3)
-
         _buffer_sensor("pressure", {"depth_m": round(depth, 2), "pressure_bar": pressure_bar})
         await _broadcast({
             "type": "pressure",
@@ -432,18 +700,32 @@ async def _simulator_loop() -> None:
             "timestamp": _last_ts("pressure"),
         })
 
+        # ---- Recording: save a frame every second ----
+        if state.recording and _now() - state.last_record_time >= 1.0:
+            state.last_record_time = _now()
+            frame = {
+                "timestamp": _now(),
+                "vessel1": {
+                    "lat": round(lat, 6), "lon": round(lon, 6),
+                    "heading": round(heading, 1), "speed": round(SURVEY_SPEED_MS, 2),
+                    "depth": round(depth, 2),
+                },
+                "vessel2": {
+                    "lat": round(v2_lat, 6), "lon": round(v2_lon, 6),
+                    "heading": round(v2_hdg, 1), "speed": round(V2_SPEED_MS, 2),
+                    "depth": None,
+                },
+            }
+            state.recorded_frames.append(frame)
 
 # ---------------------------------------------------------------------------
 # Static files (mount after API routes so routes take precedence)
 # ---------------------------------------------------------------------------
-
 if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
-
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT, reload=False)
