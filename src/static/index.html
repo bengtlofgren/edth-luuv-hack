@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
 <title>Maritime Mission Planner — Demo 5: Command Center</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0a1628;color:#d0d8e8}
@@ -78,6 +79,16 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .replay-speed.active{background:rgba(0,212,170,0.15);color:#00d4aa;border-color:#00d4aa}
 .export-btn{background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.3);color:#00d4aa;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px;font-family:inherit;transition:all 0.15s;margin-right:6px;margin-bottom:4px}
 .export-btn:hover{background:rgba(0,212,170,0.2);border-color:#00d4aa}
+#gpsdeny-btn.denied{background:rgba(212,64,64,0.2)!important;border-color:#d44040!important;color:#d44040!important;animation:pulse 1.5s infinite}
+#gpsdeny-btn.gps-active{background:rgba(0,212,100,0.15);border-color:#00d46a;color:#00d46a}
+#pos-source.source-dr{color:#f0c040!important}
+.vessel-dr-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px dashed #f0c040;filter:drop-shadow(0 0 5px rgba(240,192,64,0.5))}
+.vessel-denied-arrow{width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px solid rgba(212,64,64,0.6);filter:drop-shadow(0 0 5px rgba(212,64,64,0.3))}
+.vessel-gps-frozen{width:16px;height:16px;border-radius:50%;background:rgba(0,212,170,0.25);border:2px solid rgba(0,212,170,0.3);opacity:0.5}
+#gpsdeny-banner{display:none;background:rgba(212,64,64,0.25);color:#d44040;border:1px solid rgba(212,64,64,0.4);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+#gpsdeny-banner.visible{display:inline}
+#rec-badge{display:none;background:rgba(212,64,64,0.2);color:#d44040;border:1px solid rgba(212,64,64,0.3);border-radius:3px;padding:1px 6px;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;vertical-align:middle}
+#rec-badge.visible{display:inline}
 </style>
 </head>
 <body>
@@ -92,6 +103,14 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       <div><div class="gps-label">Speed</div><span class="panel-value" id="gps-speed">---</span></div>
       <div><div class="gps-label">Heading</div><span class="panel-value" id="gps-heading">---</span></div>
     </div>
+  </div>
+  <div class="panel" id="gpsdeny-panel">
+    <div class="panel-title">Navigation Status</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+      <button id="gpsdeny-btn" onclick="toggleGpsDenial()" style="background:rgba(0,212,100,0.15);border:1px solid #00d46a;color:#00d46a;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit">GPS: ACTIVE</button>
+      <span id="gpsdeny-timer" style="font-size:11px;color:#7a8aa0;display:none">00:00</span>
+    </div>
+    <div id="gpsdeny-info" style="font-size:10px;color:#7a8aa0">Position source: <span id="pos-source" style="color:#00d4aa">GPS</span> ± <span id="pos-uncertainty">0.0m</span></div>
   </div>
   <div class="panel">
     <div class="panel-title">Heading</div>
@@ -172,7 +191,9 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   <div id="status-left">MARITIME MISSION PLANNER &mdash; Demo 5: Command Center</div>
   <div id="status-right">
     <span id="sim-banner">SIMULATED DATA</span>
+    <span id="gpsdeny-banner">GPS DENIED — Dead Reckoning</span>
     <span><span id="status-dot" class="connecting"></span><span id="status-text">Connecting...</span></span>
+    <span id="rec-badge">REC</span>
   </div>
 </div>
 
@@ -182,7 +203,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   <div class="sub">Reconnecting in <span id="reconnect-countdown">3</span>s...</div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"></script>
 <script>
 (function(){'use strict';
 var state={lat:56.130,lon:15.580,speed:0,heading:null,depth:0,pressure:0,follow:false,trackPoints:[],msgTimestamps:[],lastMsgTime:null,connected:false};
@@ -190,6 +211,7 @@ var v2={lat:null,lon:null,heading:null,speed:null,trackPoints:[]};
 var recording=false,recStartTime=null,recTimer=null,replayData=null,replayState=null;
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
+var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
 
 function hostPort(){return window.location.hostname+':'+(window.location.port||8000);}
 function degToCompass(d){if(d==null||isNaN(d))return'---';var dirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];return dirs[Math.round(d/22.5)%16];}
@@ -208,6 +230,120 @@ ctx.fillStyle=(heading!=null&&!isNaN(heading))?'#00d4aa':'#7a8aa0';ctx.fillText(
 ctx.fillStyle='#7a8aa0';ctx.fillText('S',cx,cy+r-14);ctx.fillText('E',cx+r-14,cy);ctx.fillText('W',cx-r+14,cy);
 if(heading!=null&&!isNaN(heading)){ctx.save();ctx.translate(cx,cy);ctx.rotate(heading*Math.PI/180);ctx.beginPath();ctx.moveTo(0,-r+4);ctx.lineTo(-9,-r+20);ctx.lineTo(9,-r+20);ctx.closePath();ctx.fillStyle='#00d4aa';ctx.shadowColor='#00d4aa';ctx.shadowBlur=8;ctx.fill();ctx.restore();}
 document.getElementById('compass-heading').innerHTML=(heading!=null&&!isNaN(heading))?heading.toFixed(1)+'&deg;':'--';
+}
+
+// Ellipse math from 2x2 covariance matrix
+function ellipseFromCov(cov){
+  var trace=cov[0][0]+cov[1][1];
+  var det=cov[0][0]*cov[1][1]-cov[0][1]*cov[1][0];
+  var d=Math.sqrt(Math.max(trace*trace/4-det,0));
+  var semiMajor=Math.sqrt(Math.max(trace/2+d,0));
+  var semiMinor=Math.sqrt(Math.max(trace/2-d,0));
+  var angle=cov[0][1]!==0?Math.atan2(d-(cov[0][0]-cov[1][1])/2,cov[0][1])*180/Math.PI:(cov[0][0]>cov[1][1]?0:90);
+  return{semiMajor:semiMajor,semiMinor:semiMinor,angle:angle};
+}
+function ellipsePolygon(lat,lon,semiMajor,semiMinor,angleDeg,steps){
+  steps=steps||36;var pts=[];
+  for(var i=0;i<steps;i++){
+    var t=(i/steps)*2*Math.PI;
+    var x=semiMajor*Math.cos(t),y=semiMinor*Math.sin(t);
+    var rad=angleDeg*Math.PI/180;
+    var rx=x*Math.cos(rad)-y*Math.sin(rad);
+    var ry=x*Math.sin(rad)+y*Math.cos(rad);
+    var dLat=1/111320,dLon=1/(111320*Math.cos(lat*Math.PI/180));
+    pts.push([lat+ry*dLat,lon+rx*dLon]);
+  }return pts;
+}
+
+// GPS denial toggle
+function toggleGpsDenial(){
+  if(gpsDenied){
+    fetch('/api/gps-deny/off').then(function(r){return r.json();}).then(function(d){
+      if(d.status==='gps_restored'){setGpsDeniedState(false);}
+    }).catch(function(){});
+  }else{
+    fetch('/api/gps-deny/on').then(function(r){return r.json();}).then(function(d){
+      if(d.status==='gps_denied'){setGpsDeniedState(true);}
+    }).catch(function(){});
+  }
+}
+function setGpsDeniedState(denied){
+  gpsDenied=denied;var btn=document.getElementById('gpsdeny-btn');
+  var timer=document.getElementById('gpsdeny-timer');
+  var banner=document.getElementById('gpsdeny-banner');
+  btn.className=denied?'denied':'gps-active';
+  btn.innerHTML=denied?'GPS: DENIED':'GPS: ACTIVE';
+  timer.style.display=denied?'':'none';
+  if(denied){drDeniedStart=Date.now();updateDRTimer();fetchDeadReckon();drTimer=setInterval(function(){fetchDeadReckon();updateDRTimer();},2000);}
+  else{timer.textContent='00:00';banner.className='';document.getElementById('pos-source').className='';document.getElementById('pos-source').textContent='GPS';document.getElementById('pos-uncertainty').textContent='0.0m';stopDR();}
+}
+function updateDRTimer(){
+  if(!drDeniedStart)return;
+  var el=document.getElementById('gpsdeny-timer');
+  if(el){el.textContent=fmtDuration(Date.now()-drDeniedStart);}
+}
+function stopDR(){
+  if(drTimer){clearInterval(drTimer);drTimer=null;}
+  if(drMarker){map.removeLayer(drMarker);drMarker=null;}
+  if(gpsFrozenMarker){map.removeLayer(gpsFrozenMarker);gpsFrozenMarker=null;}
+  if(uncertaintyEllipse){map.removeLayer(uncertaintyEllipse);uncertaintyEllipse=null;}
+  if(drConnectionLine){map.removeLayer(drConnectionLine);drConnectionLine=null;}
+  if(!gpsDenied){updateVesselMarker(state.lat,state.lon,state.heading);}
+}
+function fetchDeadReckon(){
+  fetch('/api/dead-reckon').then(function(r){return r.json();}).then(function(d){
+    if(d.position_source==='dead_reckon'||d.position_source==='dr_magnetometer'){
+      updateDRVisualization(d);
+    }else if(gpsDenied){setGpsDeniedState(false);}
+  }).catch(function(){});
+}
+function updateDRVisualization(d){
+  var drLat=d.dr_lat,drLon=d.dr_lon;
+  var gpsLat=d.gps_lat,gpsLon=d.gps_lon;
+  var ell=d.uncertainty_ellipse;
+  var headingSource=d.heading_source||'Magnetometer';
+
+  // GPS frozen marker at last known position
+  if(!gpsFrozenMarker&&gpsLat!=null){
+    gpsFrozenMarker=L.marker([gpsLat,gpsLon],{icon:L.divIcon({html:'<div class="vessel-gps-frozen"></div>',iconSize:[16,16],iconAnchor:[8,8],className:''}),zIndexOffset:998}).addTo(map);
+  }else if(gpsFrozenMarker&&gpsLat!=null){gpsFrozenMarker.setLatLng([gpsLat,gpsLon]);}
+
+  // DR marker (yellow dashed)
+  var drIcon=L.divIcon({html:'<div class="vessel-dr-arrow" style="transform:rotate('+(state.heading||0)+'deg)"></div>',iconSize:[20,24],iconAnchor:[10,12],className:''});
+  if(!drMarker){drMarker=L.marker([drLat,drLon],{icon:drIcon,zIndexOffset:1001}).addTo(map);}else{drMarker.setLatLng([drLat,drLon]);drMarker.setIcon(drIcon);}
+
+  // Connection line GPS->DR
+  if(gpsLat!=null&&drLat!=null){
+    if(!drConnectionLine){drConnectionLine=L.polyline([[gpsLat,gpsLon],[drLat,drLon]],{color:'#f0c040',weight:1.5,dashArray:'5,8',opacity:0.6}).addTo(map);}
+    else{drConnectionLine.setLatLngs([[gpsLat,gpsLon],[drLat,drLon]]);}
+  }
+
+  // Uncertainty ellipse
+  if(ell&&ell.semi_major>0){
+    var pts=ellipsePolygon(drLat,drLon,ell.semi_major,ell.semi_minor,ell.angle_deg,64);
+    if(!uncertaintyEllipse){uncertaintyEllipse=L.polygon(pts,{color:'#f0c040',weight:1.5,dashArray:'4,6',fillColor:'rgba(240,192,64,0.15)',fillOpacity:1,opacity:0.7}).addTo(map);}
+    else{uncertaintyEllipse.setLatLngs(pts);}
+  }else if(uncertaintyEllipse){map.removeLayer(uncertaintyEllipse);uncertaintyEllipse=null;}
+
+  // Update sidebar
+  var src=document.getElementById('pos-source');
+  var posLabel=d.position_source==='dead_reckon'?'DR (Dead Reckon)':d.position_source==='dr_magnetometer'?'DR + Mag':'GPS';
+  src.textContent=posLabel;src.className='source-dr';
+  document.getElementById('pos-uncertainty').textContent='±'+(d.uncertainty_m!=null?d.uncertainty_m.toFixed(1):'?')+'m';
+  document.getElementById('gpsdeny-banner').className='visible';
+  var banner=document.getElementById('sim-banner');if(banner)banner.style.display='none';
+
+  // Update vessel popup with DR info
+  if(vesselMarker){
+    var hdg=(state.heading!=null&&!isNaN(state.heading))?state.heading.toFixed(1)+'&deg;':'---';
+    var spd=(state.speed!=null)?state.speed.toFixed(1)+' kn':'---';
+    var drInfo='Heading: '+hdg+'<br>Depth: '+(state.depth?state.depth.toFixed(1)+' m':'---');
+    if(gpsLat!=null){drInfo+='<br><span style="color:#7a8aa0">GPS: </span>'+gpsLat.toFixed(6)+', '+gpsLon.toFixed(6);}
+    drInfo+='<br><span style="color:#f0c040">DR: </span>'+drLat.toFixed(6)+', '+drLon.toFixed(6);
+    if(d.uncertainty_m!=null){drInfo+='<br>Uncertainty: ±'+d.uncertainty_m.toFixed(1)+'m';}
+    drInfo+='<br>Heading source: '+headingSource;
+    vesselMarker.bindPopup(drInfo);
+  }
 }
 
 function createVesselIcon(heading){
@@ -360,6 +496,12 @@ function riskColor(score){if(score<0.3)return'#00d46a';if(score<0.6)return'#d4a0
 function updateRiskPolyline(segments){riskLayerGroup.clearLayers();if(!segments||!segments.length)return;var coords=wpMarkers.map(function(m){return[m.getLatLng().lat,m.getLatLng().lng];});if(coords.length<2)return;for(var i=0;i<segments.length&&i<coords.length-1;i++){var seg=segments[i];var line=L.polyline([coords[i],coords[i+1]],{color:riskColor(seg.risk_score),weight:3,opacity:0.8});line.bindTooltip('WP'+seg.from_id+' -> '+seg.to_id+': '+seg.distance_m.toFixed(0)+'m | Risk: '+(seg.risk_score*100).toFixed(0)+'% | Depth: '+(seg.avg_depth_m||'?')+'m',{sticky:true});riskLayerGroup.addLayer(line);}}
 function fetchRisk(){fetch('/api/risk').then(function(r){return r.json();}).then(function(data){updateRiskPolyline(data.segments);var score=data.mission_risk;var el=document.getElementById('risk-score');var bar=document.getElementById('risk-bar');var cls=score<0.3?'risk-low':score<0.6?'risk-med':'risk-high';el.textContent=(score*100).toFixed(0)+'%';el.className=cls;bar.style.background='linear-gradient(to right, #00d46a, #d4a000 '+(score*100)+'%, #1a3050 '+(score*100)+'%)';bar.style.width='100%';if(data.imu){document.getElementById('risk-drift').textContent=data.imu.drift_rate_dps.toFixed(3)+'/s';document.getElementById('risk-gps-age').textContent=data.imu.last_gps_sec.toFixed(0)+'s';}}).catch(function(){});}
 
+// GPS Denial + Dead Reckoning
+var gpsDenied=false,drMarker=null,ellipsePolygon=null,drTimer=null;
+function toggleGpsDenial(){var btn=document.getElementById('gpsdeny-btn'),timer=document.getElementById('gpsdeny-timer'),ep=gpsDenied?'/api/gps-deny/off':'/api/gps-deny/on';fetch(ep).then(function(r){return r.json();}).then(function(){gpsDenied=!gpsDenied;if(gpsDenied){btn.textContent='GPS: DENIED';btn.style.background='rgba(212,64,64,0.2)';btn.style.borderColor='#d44040';btn.style.color='#d44040';timer.style.display='';document.getElementById('pos-source').textContent='Dead Reckon';document.getElementById('pos-source').style.color='#f0c040';pollDr();drTimer=setInterval(pollDr,2000);}else{btn.textContent='GPS: ACTIVE';btn.style.background='rgba(0,212,100,0.15)';btn.style.borderColor='#00d46a';btn.style.color='#00d46a';timer.style.display='none';document.getElementById('pos-source').textContent='GPS';document.getElementById('pos-source').style.color='#00d4aa';document.getElementById('pos-uncertainty').textContent='0.0m';clearDr();}});}
+function pollDr(){fetch('/api/dead-reckon').then(function(r){return r.json();}).then(function(d){if(!gpsDenied)return;var s=d.seconds_since_gps||0,m=Math.floor(s/60),ss=Math.floor(s%60);document.getElementById('gpsdeny-timer').textContent=String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0');document.getElementById('pos-uncertainty').textContent=(d.uncertainty_m||0).toFixed(1)+'m';if(d.dr_lat!=null&&d.dr_lon!=null){if(!drMarker){drMarker=L.marker([d.dr_lat,d.dr_lon],{icon:L.divIcon({html:'<div style="width:12px;height:12px;border-radius:50%;background:#f0c040;border:2px dashed #d4a000;box-shadow:0 0 6px #f0c040"></div>',iconSize:[12,12],iconAnchor:[6,6],className:''}),zIndexOffset:900}).addTo(map);}else{drMarker.setLatLng([d.dr_lat,d.dr_lon]);}}drawEllipse(d);});}
+function drawEllipse(d){if(ellipsePolygon){map.removeLayer(ellipsePolygon);ellipsePolygon=null;}var el=d.uncertainty_ellipse;if(!el||!el.semi_major||el.semi_major<0.5)return;var lat=d.dr_lat||state.lat,lon=d.dr_lon||state.lon,pts=[],dlat=1/111320,dlon=1/(111320*Math.cos(lat*Math.PI/180)),ar=(el.angle_deg||0)*Math.PI/180;for(var i=0;i<=48;i++){var t=i/48*2*Math.PI,ex=el.semi_major*Math.cos(t),ey=el.semi_minor*Math.sin(t),rx=ex*Math.cos(ar)-ey*Math.sin(ar),ry=ex*Math.sin(ar)+ey*Math.cos(ar);pts.push([lat+ry*dlat,lon+rx*dlon]);}ellipsePolygon=L.polygon(pts,{color:'#f0c040',weight:1.5,dashArray:'4 3',opacity:0.7,fillColor:'#f0c040',fillOpacity:0.12}).addTo(map);}
+function clearDr(){if(drTimer){clearInterval(drTimer);drTimer=null;}if(drMarker){map.removeLayer(drMarker);drMarker=null;}if(ellipsePolygon){map.removeLayer(ellipsePolygon);ellipsePolygon=null;}document.getElementById('gpsdeny-timer').style.display='none';}
 // Init
 document.addEventListener('DOMContentLoaded',function(){var initLat=56.130,initLon=15.580;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);});
 });

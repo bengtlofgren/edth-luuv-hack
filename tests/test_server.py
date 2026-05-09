@@ -951,3 +951,333 @@ class TestMultiVessel:
         assert "vessel2_lon" in data
         assert "vessel2_heading_deg" in data
         assert "vessel2_speed_kn" in data
+
+
+# ===================================================================
+# 55-58.  GPS Denial
+# ===================================================================
+
+
+class TestGpsDenial:
+    @pytest.mark.asyncio
+    async def test_gps_deny_on(self, client):
+        """GET /api/gps-deny/on toggles denial on; status and state reflect it."""
+        resp = await client.get("/api/gps-deny/on")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "gps_denied"
+
+        resp = await client.get("/api/gps-deny/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["denied"] is True
+        assert isinstance(data["seconds_without_gps"], float)
+
+        resp = await client.get("/api/state")
+        assert resp.status_code == 200
+        assert resp.json()["gps_denied"] is True
+        assert resp.json()["position_source"] == "dead_reckon"
+
+    @pytest.mark.asyncio
+    async def test_gps_deny_off(self, client):
+        """Toggle on then off; status shows denied=false, position_source=gps."""
+        await client.get("/api/gps-deny/on")
+        resp = await client.get("/api/gps-deny/off")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "gps_restored"
+
+        resp = await client.get("/api/gps-deny/status")
+        assert resp.status_code == 200
+        assert resp.json()["denied"] is False
+
+        resp = await client.get("/api/state")
+        assert resp.status_code == 200
+        assert resp.json()["gps_denied"] is False
+        assert resp.json()["position_source"] == "gps"
+
+    @pytest.mark.asyncio
+    async def test_gps_deny_status(self, monkeypatch):
+        """GET /api/gps-deny/status returns denial state and seconds_without_gps field."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Status before denial
+            resp = await ac.get("/api/gps-deny/status")
+            assert resp.status_code == 200
+            assert resp.json()["denied"] is False
+            assert resp.json()["seconds_without_gps"] == 0.0
+
+            # Enable denial
+            await ac.get("/api/gps-deny/on")
+            resp = await ac.get("/api/gps-deny/status")
+            assert resp.status_code == 200
+            assert resp.json()["denied"] is True
+            assert resp.json()["seconds_without_gps"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_gps_deny_stops_gps_broadcast(self, monkeypatch):
+        """With GPS denied, POST /gps should not update track state position."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Post initial GPS fix
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59})
+            resp = await ac.get("/api/track")
+            initial_count = resp.json()["properties"]["count"]
+            assert initial_count == 1
+
+            # Enable denial
+            await ac.get("/api/gps-deny/on")
+
+            # Post GPS again — should not append to track_buffer
+            await ac.post("/gps", json={"lat": 56.18, "lon": 15.60})
+
+            # Track count should remain unchanged
+            resp = await ac.get("/api/track")
+            assert resp.json()["properties"]["count"] == initial_count
+
+
+# ===================================================================
+# 59-62.  Dead Reckoning
+# ===================================================================
+
+
+class TestDeadReckoning:
+    @pytest.mark.asyncio
+    async def test_dead_reckon_returns_position(self, client):
+        """GET /api/dead-reckon returns DR position, uncertainty, and heading fields."""
+        await client.post(
+            "/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0, "heading_deg": 45.0},
+        )
+        await asyncio.sleep(0.2)
+        await client.get("/api/gps-deny/on")
+
+        resp = await client.get("/api/dead-reckon")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["dr_lat"] is not None
+        assert data["dr_lon"] is not None
+        assert "gps_lat" in data
+        assert "gps_lon" in data
+        assert data["heading_source"] == "magnetometer"
+        assert isinstance(data["uncertainty_m"], float)
+        assert data["position_source"] == "dead_reckon"
+        assert isinstance(data["uncertainty_ellipse"], dict)
+
+    @pytest.mark.asyncio
+    async def test_dead_reckon_uncertainty_grows(self, monkeypatch):
+        """Enable GPS denial, then verify uncertainty increases over time."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Inject gyro bias so drift_rate_dps > 0
+            for _ in range(50):
+                await ac.post(
+                    "/data",
+                    json={
+                        "payload": [
+                            {"name": "gyroscope", "values": {"x": 0.0, "y": 0.0, "z": 0.05}},
+                        ]
+                    },
+                )
+
+            # Post GPS with speed so uncertainty formula has inputs
+            await ac.post(
+                "/gps",
+                json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0},
+            )
+
+            # Enable denial
+            await ac.get("/api/gps-deny/on")
+
+            # Uncertainty at t=0
+            resp = await ac.get("/api/dead-reckon")
+            u0 = resp.json()["uncertainty_m"]
+
+            # Wait for uncertainty to accumulate
+            await asyncio.sleep(2.0)
+
+            resp = await ac.get("/api/dead-reckon")
+            u1 = resp.json()["uncertainty_m"]
+
+            assert u1 > u0, f"Expected uncertainty to grow over time: {u0} -> {u1}"
+
+    @pytest.mark.asyncio
+    async def test_dead_reckon_resets_on_gps(self, client):
+        """Turn GPS denial off; verify position_source returns to 'gps'."""
+        await client.get("/api/gps-deny/on")
+        resp = await client.get("/api/dead-reckon")
+        assert resp.json()["position_source"] == "dead_reckon"
+
+        await client.get("/api/gps-deny/off")
+        resp = await client.get("/api/dead-reckon")
+        assert resp.json()["position_source"] == "gps"
+
+    @pytest.mark.asyncio
+    async def test_dead_reckon_ellipse_fields(self, client):
+        """Verify uncertainty_ellipse has semi_major, semi_minor, angle_deg."""
+        await client.post(
+            "/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0},
+        )
+        await asyncio.sleep(0.2)
+        await client.get("/api/gps-deny/on")
+
+        resp = await client.get("/api/dead-reckon")
+        assert resp.status_code == 200
+        ellipse = resp.json()["uncertainty_ellipse"]
+
+        assert "semi_major" in ellipse
+        assert "semi_minor" in ellipse
+        assert "angle_deg" in ellipse
+        assert isinstance(ellipse["semi_major"], float)
+        assert isinstance(ellipse["semi_minor"], float)
+        assert isinstance(ellipse["angle_deg"], float)
+
+
+# ===================================================================
+# 63-65.  Magnetometer
+# ===================================================================
+
+
+class TestMagnetometer:
+    @pytest.mark.asyncio
+    async def test_mag_heading_stored(self, monkeypatch):
+        """POST magnetometer data; verify mag_heading is computed and available."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Post magnetometer with known x,y
+            await ac.post(
+                "/data",
+                json={
+                    "payload": [
+                        {"name": "magnetometer", "values": {"x": 0.0, "y": 1.0, "z": 45.0}},
+                    ]
+                },
+            )
+            # Post GPS and enable denial so dead-reckon endpoint is meaningful
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59, "speed_kn": 5.0})
+            await ac.get("/api/gps-deny/on")
+
+            resp = await ac.get("/api/dead-reckon")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["heading_source"] == "magnetometer"
+            assert isinstance(data["uncertainty_ellipse"]["angle_deg"], float)
+
+    @pytest.mark.asyncio
+    async def test_dead_reckon_uses_mag_heading(self, client):
+        """During GPS denial, verify heading_source is 'magnetometer' in /api/dead-reckon."""
+        await client.get("/api/gps-deny/on")
+        resp = await client.get("/api/dead-reckon")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["heading_source"] == "magnetometer"
+
+    @pytest.mark.asyncio
+    async def test_hard_iron_correction_applied(self, monkeypatch):
+        """POST biased mag data; verify computed heading is within 0-360 range."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            test_cases = [(10.0, -5.0), (-10.0, 0.0), (0.0, -10.0), (-5.0, -5.0)]
+            for x, y in test_cases:
+                await ac.post(
+                    "/data",
+                    json={
+                        "payload": [
+                            {"name": "magnetometer", "values": {"x": float(x), "y": float(y), "z": 30.0}},
+                        ]
+                    },
+                )
+                mag_heading = src.server.state.mag_heading
+                assert 0 <= mag_heading <= 360.0, (
+                    f"mag_heading {mag_heading} out of range for x={x}, y={y}"
+                )
+
+
+# ===================================================================
+# 66-68.  Integration: GPS denial doesn't break other features
+# ===================================================================
+
+
+class TestIntegration:
+    @pytest.mark.asyncio
+    async def test_gps_deny_doesnt_break_waypoints(self, monkeypatch):
+        """Waypoint CRUD still works while GPS denial is active."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Enable GPS denial
+            await ac.get("/api/gps-deny/on")
+
+            # Create a waypoint
+            resp = await ac.post(
+                "/api/waypoints",
+                json={"lat": 56.16, "lon": 15.59, "name": "WP1"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["id"] == 1
+
+            # List waypoints
+            resp = await ac.get("/api/waypoints")
+            assert resp.status_code == 200
+            assert len(resp.json()) == 1
+
+            # Delete waypoint
+            resp = await ac.delete("/api/waypoints/1")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_gps_deny_doesnt_break_risk(self, monkeypatch):
+        """Risk assessment still returns valid segments during GPS denial."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Create waypoints and GPS fix
+            await ac.post("/api/waypoints", json={"lat": 56.16, "lon": 15.59})
+            await ac.post("/api/waypoints", json={"lat": 56.18, "lon": 15.60})
+            await ac.post("/gps", json={"lat": 56.16, "lon": 15.59})
+
+            # Enable GPS denial
+            await ac.get("/api/gps-deny/on")
+
+            # Risk should still work
+            resp = await ac.get("/api/risk")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["segments"]) == 1
+            assert "mission_risk" in data
+            assert "imu" in data
+
+    @pytest.mark.asyncio
+    async def test_gps_deny_doesnt_break_recording(self, monkeypatch):
+        """Recording start/stop/status still works during GPS denial."""
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Enable GPS denial
+            await ac.get("/api/gps-deny/on")
+
+            # Start recording
+            resp = await ac.get("/api/recording/start")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "recording"
+
+            # Status shows recording is active
+            resp = await ac.get("/api/recording/status")
+            assert resp.status_code == 200
+            assert resp.json()["recording"] is True
+
+            # Stop recording
+            resp = await ac.get("/api/recording/stop")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "frames" in data
+            assert "duration_sec" in data
+
+            # Status shows recording stopped
+            resp = await ac.get("/api/recording/status")
+            assert resp.status_code == 200
+            assert resp.json()["recording"] is False

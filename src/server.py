@@ -143,6 +143,19 @@ class AppState:
         self.recording_start_time: float = 0.0
         self.last_record_time: float = 0.0
 
+        # GPS denial & dead reckoning
+        self.gps_denied: bool = False
+        self.gps_deny_start_time: float | None = None
+        self.dr_lat: float | None = None
+        self.dr_lon: float | None = None
+        self.dr_heading: float = 0.0
+        self.dr_last_gps_speed_kn: float = 0.0
+
+        # Magnetometer calibration
+        self.mag_hard_iron: list[float] = [0.0, 0.0, 0.0]
+        self.mag_soft_iron: list[list[float]] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        self.mag_heading: float = 0.0
+
 state = AppState()
 
 
@@ -229,7 +242,7 @@ app.add_middleware(
 async def _broadcast(message: dict[str, Any]) -> None:
     """Send *message* to every connected WebSocket client."""
     stale: list[WebSocket] = []
-    for ws in state.websockets:
+    for ws in list(state.websockets):
         try:
             await ws.send_json(message)
         except Exception:
@@ -255,16 +268,25 @@ async def post_data(data: DataPayload):
             "timestamp": _last_ts(sensor.name),
         })
         if sensor.name == "gyroscope" and "z" in sensor.values:
-            state.gyro_z_samples.append(sensor.values["z"])
-            state.gyro_z_bias = sum(state.gyro_z_samples) / len(state.gyro_z_samples)
-            _recalc_drift()
+            z = sensor.values["z"]
+            if math.isfinite(z):
+                state.gyro_z_samples.append(z)
+                state.gyro_z_bias = sum(state.gyro_z_samples) / len(state.gyro_z_samples)
+                _recalc_drift()
         if sensor.name == "accelerometer":
             mag = math.sqrt(sensor.values.get("x", 0)**2 + sensor.values.get("y", 0)**2 + sensor.values.get("z", 0)**2)
-            state.accel_mags.append(mag)
-            if len(state.accel_mags) > 1:
-                m = sum(state.accel_mags) / len(state.accel_mags)
-                state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
-            _recalc_drift()
+            if math.isfinite(mag):
+                state.accel_mags.append(mag)
+                if len(state.accel_mags) > 1:
+                    m = sum(state.accel_mags) / len(state.accel_mags)
+                    state.accel_variance = sum((v - m) ** 2 for v in state.accel_mags) / len(state.accel_mags)
+                _recalc_drift()
+        if sensor.name == "magnetometer":
+            x = sensor.values.get("x", 0.0) - state.mag_hard_iron[0]
+            y = sensor.values.get("y", 0.0) - state.mag_hard_iron[1]
+            if math.isfinite(x) and math.isfinite(y):
+                state.mag_heading = math.degrees(math.atan2(y, x)) % 360.0
+                state.dr_heading = state.mag_heading
     return {"status": "ok"}
 
 @app.post("/gps")
@@ -276,22 +298,23 @@ async def post_gps(data: GpsData):
     if data.heading_deg is not None:
         entry["heading_deg"] = data.heading_deg
     _buffer_sensor("gps", entry)
-    await _broadcast({
-        "type": "gps",
-        "lat": data.lat,
-        "lon": data.lon,
-        "speed_kn": data.speed_kn,
-        "heading_deg": data.heading_deg,
-        "timestamp": _last_ts("gps"),
-    })
-    state.track_buffer.append({
-        "lat": data.lat,
-        "lon": data.lon,
-        "timestamp": _now(),
-        "speed_kn": data.speed_kn,
-        "heading_deg": data.heading_deg,
-    })
-    state.last_gps_time = _now()
+    if not state.gps_denied:
+        await _broadcast({
+            "type": "gps",
+            "lat": data.lat,
+            "lon": data.lon,
+            "speed_kn": data.speed_kn,
+            "heading_deg": data.heading_deg,
+            "timestamp": _last_ts("gps"),
+        })
+        state.track_buffer.append({
+            "lat": data.lat,
+            "lon": data.lon,
+            "timestamp": _now(),
+            "speed_kn": data.speed_kn,
+            "heading_deg": data.heading_deg,
+        })
+        state.last_gps_time = _now()
     return {"status": "ok"}
 
 @app.post("/pressure")
@@ -321,6 +344,8 @@ async def get_api_state():
     result: dict[str, Any] = {
         "lat": None, "lon": None, "speed_kn": None, "heading_deg": None,
         "depth_m": None, "timestamp": None,
+        "gps_denied": state.gps_denied,
+        "position_source": "dead_reckon" if state.gps_denied else "gps",
         "vessel2_lat": state.vessel2_lat, "vessel2_lon": state.vessel2_lon,
         "vessel2_heading_deg": state.vessel2_heading,
         "vessel2_speed_kn": round(state.vessel2_speed * 1.94384, 1),
@@ -388,6 +413,8 @@ async def get_api_bathymetry_info():
 
 @app.post("/api/waypoints")
 async def create_waypoint(wp: WaypointIn):
+    if len(state.waypoints) >= 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 waypoints")
     depth = get_depth(wp.lat, wp.lon)
     if depth is None or depth < 2.0:
         raise HTTPException(
@@ -530,6 +557,68 @@ async def export_csv():
     return Response(content="\n".join(rows), media_type="text/csv")
 
 # ---------------------------------------------------------------------------
+# GPS Denial & Dead Reckoning
+# ---------------------------------------------------------------------------
+
+@app.get("/api/gps-deny/on")
+async def gps_deny_on():
+    state.gps_denied = True
+    state.gps_deny_start_time = _now()
+    gps_buf = state.buffers.get("gps")
+    if gps_buf:
+        last = gps_buf[-1]
+        state.dr_lat = last.get("lat")
+        state.dr_lon = last.get("lon")
+        state.dr_last_gps_speed_kn = last.get("speed_kn", 0.0)
+    state.dr_heading = state.mag_heading
+    return {"status": "gps_denied"}
+
+@app.get("/api/gps-deny/off")
+async def gps_deny_off():
+    state.gps_denied = False
+    state.gps_deny_start_time = None
+    return {"status": "gps_restored"}
+
+@app.get("/api/gps-deny/status")
+async def gps_deny_status():
+    secs = (_now() - state.gps_deny_start_time) if state.gps_denied else 0.0
+    return {"denied": state.gps_denied, "seconds_without_gps": round(secs, 1)}
+
+@app.get("/api/dead-reckon")
+async def get_dead_reckon():
+    now = _now()
+    gps_buf = state.buffers.get("gps")
+    last_gps = gps_buf[-1] if gps_buf else None
+    secs = (now - state.gps_deny_start_time) if state.gps_denied else 0.0
+    speed_kn = state.dr_last_gps_speed_kn or (last_gps.get("speed_kn", 0.0) if last_gps else 0.0)
+    uncertainty_m = speed_kn * 0.514 * secs * state.drift_rate_dps * 0.1
+    heading = state.dr_heading
+    hr = math.radians(heading)
+    c, s = math.cos(hr), math.sin(hr)
+    lm, ln = (uncertainty_m * 1.5) ** 2, (uncertainty_m * 0.3) ** 2
+    cov_ee = lm * c * c + ln * s * s
+    cov_nn = lm * s * s + ln * c * c
+    cov_en = (lm - ln) * s * c
+    return {
+        "dr_lat": state.dr_lat,
+        "dr_lon": state.dr_lon,
+        "gps_lat": last_gps.get("lat") if last_gps else None,
+        "gps_lon": last_gps.get("lon") if last_gps else None,
+        "heading_source": "magnetometer",
+        "uncertainty_m": round(uncertainty_m, 1),
+        "uncertainty_ellipse": {
+            "semi_major": round(uncertainty_m * 1.5, 1),
+            "semi_minor": round(uncertainty_m * 0.3, 1),
+            "angle_deg": round(heading, 1),
+        },
+        "seconds_since_gps": round(secs, 1),
+        "position_source": "dead_reckon" if state.gps_denied else "gps",
+        "mean": [state.dr_lat, state.dr_lon],
+        "cov": [[round(cov_nn, 4), round(cov_en, 4)], [round(cov_en, 4), round(cov_ee, 4)]],
+    }
+
+
+# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/ws")
@@ -560,11 +649,13 @@ async def _simulator_loop() -> None:
     phase_dist = 0.0   # metres travelled in current phase
     lat_off = 0.0
     lon_off = 0.0
+    sim_tick = 0
 
     while True:
         await asyncio.sleep(SIMULATOR_RATE)
         sim_time += SIMULATOR_RATE
         t = sim_time
+        sim_tick += 1
 
         heading = SURVEY_HEADINGS[phase]
         step_m = SURVEY_SPEED_MS * SIMULATOR_RATE
@@ -596,6 +687,8 @@ async def _simulator_loop() -> None:
         mag_y = 25.0 * math.sin(math.radians(yaw)) + 2.0 * _smooth_noise(t, 8.0)
         mag_z = 45.0 + 3.0 * math.sin(0.05 * t)
         mag_heading = yaw  # compass heading = yaw
+        state.mag_heading = mag_heading
+        state.dr_heading = mag_heading
 
         # ---- Barometer ----
         atmospheric_pressure = 1013.25 + 2.0 * math.sin(0.01 * t) + 0.5 * _smooth_noise(t, 9.0)
@@ -643,22 +736,49 @@ async def _simulator_loop() -> None:
         lat = BASE_LAT + lat_off + 5e-5 * math.sin(0.1 * t)
         lon = BASE_LON + lon_off + 5e-5 * math.cos(0.08 * t)
 
-        _buffer_sensor("gps", {"lat": round(lat, 6), "lon": round(lon, 6), "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1), "heading_deg": round(heading, 1)})
-        await _broadcast({
-            "type": "gps",
-            "lat": round(lat, 6),
-            "lon": round(lon, 6),
-            "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
-            "heading_deg": round(heading, 1),
-            "timestamp": _last_ts("gps"),
-        })
-        state.track_buffer.append({
-            "lat": round(lat, 6),
-            "lon": round(lon, 6),
-            "timestamp": _last_ts("gps"),
-            "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
-            "heading_deg": round(heading, 1),
-        })
+        if not state.gps_denied:
+            _buffer_sensor("gps", {"lat": round(lat, 6), "lon": round(lon, 6), "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1), "heading_deg": round(heading, 1)})
+            await _broadcast({
+                "type": "gps",
+                "lat": round(lat, 6),
+                "lon": round(lon, 6),
+                "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
+                "heading_deg": round(heading, 1),
+                "timestamp": _last_ts("gps"),
+            })
+            state.track_buffer.append({
+                "lat": round(lat, 6),
+                "lon": round(lon, 6),
+                "timestamp": _last_ts("gps"),
+                "speed_kn": round(SURVEY_SPEED_MS * 1.94384, 1),
+                "heading_deg": round(heading, 1),
+            })
+
+        # Dead reckoning during GPS denial
+        if state.gps_denied and state.dr_lat is not None:
+            hdg = math.radians(state.dr_heading)
+            spd = state.dr_last_gps_speed_kn * 0.514444
+            dist = spd * SIMULATOR_RATE
+            state.dr_lat += dist * math.cos(hdg) / 111320.0
+            state.dr_lon += dist * math.sin(hdg) / (111320.0 * math.cos(math.radians(state.dr_lat)))
+
+        # ---- Dead reckon WS (1 Hz during denial) ----
+        if state.gps_denied and state.dr_lat is not None and sim_tick % 20 == 0:
+            gps_age = _now() - state.gps_deny_start_time if state.gps_deny_start_time else 0.0
+            spd = state.dr_last_gps_speed_kn or SURVEY_SPEED_MS * 1.94384
+            unc = spd * 0.514 * gps_age * state.drift_rate_dps * 0.1
+            hdg, hr = state.dr_heading, math.radians(state.dr_heading)
+            lm, ln = (unc * 1.5) ** 2, (unc * 0.3) ** 2
+            c, s = math.cos(hr), math.sin(hr)
+            cv = [[round(lm * s * s + ln * c * c, 4), round((lm - ln) * s * c, 4)],
+                  [round((lm - ln) * s * c, 4), round(lm * c * c + ln * s * s, 4)]]
+            await _broadcast({
+                "type": "dead_reckon", "lat": state.dr_lat, "lon": state.dr_lon,
+                "gps_age_sec": round(gps_age, 1),
+                "fix_type": "dead_reckon",
+                "mean": [state.dr_lat, state.dr_lon],
+                "cov": cv,
+            })
 
         # ---- Vessel 2 (support) figure-8 holding pattern ----
         cos_lat = math.cos(math.radians(BASE_LAT))
