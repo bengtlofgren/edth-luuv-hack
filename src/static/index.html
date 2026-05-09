@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maritime Mission Planner &mdash; Demo 2</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0a1628;color:#d0d8e8}
+#map{position:absolute;top:0;left:0;right:0;bottom:32px;z-index:1}
+#map .leaflet-tile-pane{filter:brightness(0.75) contrast(1.1)}
+#map .leaflet-control-zoom a{background:#0f1f38;color:#d0d8e8;border-color:#1a3050}
+#map .leaflet-control-zoom a:hover{background:#1a3050;color:#00d4aa}
+#map .leaflet-control-attribution{background:rgba(15,31,56,0.7);color:#7a8aa0;font-size:9px}
+#sidebar{position:absolute;top:0;right:0;bottom:32px;width:320px;z-index:10;background:rgba(15,31,56,0.92);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-left:1px solid rgba(0,212,170,0.15);overflow-y:auto;padding:12px 14px}
+#sidebar::-webkit-scrollbar{width:4px}
+#sidebar::-webkit-scrollbar-track{background:transparent}
+#sidebar::-webkit-scrollbar-thumb{background:#1a3050;border-radius:2px}
+.panel{background:rgba(10,22,40,0.6);border:1px solid rgba(0,212,170,0.12);border-radius:6px;padding:10px 12px;margin-bottom:10px}
+.panel-title{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:#7a8aa0;margin-bottom:6px}
+.panel-value{font-family:'JetBrains Mono','Cascadia Code','Consolas',monospace;color:#d0d8e8}
+.gps-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px}
+.gps-label{color:#7a8aa0;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:1px}
+#compass-container{text-align:center;padding:4px 0}
+#compass-canvas{width:100px;height:100px}
+#compass-heading{font-family:monospace;font-size:22px;color:#00d4aa;margin-top:2px}
+.depth-value{font-size:36px;font-weight:300;line-height:1}
+.depth-value .unit{font-size:14px;color:#7a8aa0;margin-left:4px}
+.depth-green{color:#00d46a}
+.depth-yellow{color:#d4a000}
+.depth-red{color:#d44040}
+.baro-value{font-size:24px;font-weight:300}
+.baro-value .unit{font-size:13px;color:#7a8aa0;margin-left:4px}
+.datarate-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;font-family:monospace}
+.datarate-label{color:#7a8aa0;font-size:10px;text-transform:uppercase}
+#status-bar{position:absolute;bottom:0;left:0;right:0;z-index:15;height:32px;background:rgba(10,22,40,0.95);border-top:1px solid rgba(0,212,170,0.15);display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:11px}
+#status-left{color:#7a8aa0}
+#status-right{display:flex;align-items:center;gap:10px}
+#sim-banner{background:rgba(212,160,0,0.2);color:#d4a000;border:1px solid rgba(212,160,0,0.3);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+#status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+#status-dot.live{background:#00d46a;box-shadow:0 0 6px #00d46a}
+#status-dot.dead{background:#d44040;box-shadow:0 0 6px #d44040}
+#status-dot.connecting{background:#d4a000;animation:pulse 1s infinite}
+#disconnect-overlay{position:absolute;top:0;left:0;right:0;bottom:32px;z-index:20;background:rgba(0,0,0,0.55);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px}
+#disconnect-overlay.visible{display:flex}
+#disconnect-overlay .status-icon{width:48px;height:48px;border:3px solid #d44040;border-radius:50%;display:flex;align-items:center;justify-content:center}
+#disconnect-overlay .status-icon::after{content:'';width:20px;height:3px;background:#d44040;border-radius:2px}
+#disconnect-overlay .msg{font-size:18px;font-weight:500;color:#d0d8e8}
+#disconnect-overlay .sub{font-size:13px;color:#7a8aa0}
+.layer-ctrl{display:flex!important;gap:2px;padding:4px!important;background:rgba(15,31,56,0.92)!important;border-radius:4px!important}
+.map-btn-base,.map-btn-overlay{border:1px solid rgba(0,212,170,0.2);background:rgba(10,22,40,0.7);color:#7a8aa0;padding:4px 8px;font-size:10px;cursor:pointer;border-radius:3px;font-family:inherit;transition:all 0.2s}
+.map-btn-base:hover,.map-btn-overlay:hover{color:#00d4aa;border-color:#00d4aa}
+.map-btn-base.active,.map-btn-overlay.active{background:rgba(0,212,170,0.15);color:#00d4aa;border-color:#00d4aa}
+.map-btn{background:#0f1f38;color:#d0d8e8;border:1px solid #1a3050;padding:5px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-family:inherit}
+.map-btn:hover{background:#1a3050;color:#00d4aa;border-color:#00d4aa}
+.map-btn.active{background:rgba(0,212,170,0.15);color:#00d4aa;border-color:#00d4aa}
+.map-btn:first-child{border-radius:4px 0 0 4px}
+.map-btn:last-child{border-radius:0 4px 4px 0}
+.follow-btn{padding:6px 12px;border-radius:4px;font-size:12px;white-space:nowrap}
+.leaflet-control-topright .follow-btn{display:block;width:100%}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.leaflet-popup-content-wrapper{background:#0f1f38;color:#d0d8e8;border:1px solid rgba(0,212,170,0.2);border-radius:6px}
+.leaflet-popup-tip{background:#0f1f38;border:1px solid rgba(0,212,170,0.2)}
+.leaflet-popup-content{margin:8px 12px;font-size:12px;font-family:monospace;line-height:1.6}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="sidebar">
+  <div class="panel">
+    <div class="panel-title">GPS Position</div>
+    <div class="gps-grid">
+      <div><div class="gps-label">Latitude</div><span class="panel-value" id="gps-lat">---</span></div>
+      <div><div class="gps-label">Longitude</div><span class="panel-value" id="gps-lon">---</span></div>
+      <div><div class="gps-label">Speed</div><span class="panel-value" id="gps-speed">---</span></div>
+      <div><div class="gps-label">Heading</div><span class="panel-value" id="gps-heading">---</span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Heading</div>
+    <div id="compass-container">
+      <canvas id="compass-canvas" width="100" height="100"></canvas>
+      <div id="compass-heading">--</div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Depth Below Keel</div>
+    <div class="depth-value" id="depth-value">--</div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Barometric Pressure</div>
+    <div class="baro-value" id="baro-value">--</div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Data Telemetry</div>
+    <div class="datarate-grid">
+      <div><div class="datarate-label">Rate</div><span id="datarate-rate">0.0</span> msg/s</div>
+      <div><div class="datarate-label">Last</div><span id="datarate-last">--</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="status-bar">
+  <div id="status-left">MARITIME MISSION PLANNER &mdash; Demo 2: Live Map Tracking</div>
+  <div id="status-right">
+    <span id="sim-banner">SIMULATED DATA</span>
+    <span><span id="status-dot" class="connecting"></span><span id="status-text">Connecting...</span></span>
+  </div>
+</div>
+
+<div id="disconnect-overlay">
+  <div class="status-icon"></div>
+  <div class="msg">Connection Lost</div>
+  <div class="sub">Reconnecting in <span id="reconnect-countdown">3</span>s...</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+<script>
+(function() {
+  'use strict';
+
+  var state = {
+    lat: 59.4370, lon: 10.6550, speed: 0, heading: null,
+    depth: 0, pressure: 0, follow: true,
+    trackPoints: [], msgTimestamps: [], lastMsgTime: null, connected: false
+  };
+  var map = null, vesselMarker = null, trackPolyline = null, ws = null;
+  var reconnectTimer = null, countdownTimer = null;
+
+  function hostPort() {
+    return window.location.hostname + ':' + (window.location.port || 8000);
+  }
+  function degToCompass(d) {
+    if (d == null || isNaN(d)) return '---';
+    var dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    return dirs[Math.round(d / 22.5) % 16];
+  }
+  function fmtTime(ts) {
+    if (!ts) return '--';
+    var d = new Date(ts);
+    return String(d.getHours()).padStart(2,'0') + ':' +
+      String(d.getMinutes()).padStart(2,'0') + ':' +
+      String(d.getSeconds()).padStart(2,'0') + '.' +
+      String(d.getMilliseconds()).padStart(3,'0');
+  }
+
+  function drawCompass(heading) {
+    var c = document.getElementById('compass-canvas');
+    if (!c) return;
+    var ctx = c.getContext('2d'), cx = 50, cy = 50, r = 40;
+    ctx.clearRect(0, 0, 100, 100);
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI);
+    ctx.strokeStyle = '#1a3050'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, r-1, 0, 2*Math.PI);
+    ctx.strokeStyle = 'rgba(0,212,170,0.15)'; ctx.lineWidth = 1; ctx.stroke();
+    for (var i = 0; i < 12; i++) {
+      var a = i * 30 * Math.PI / 180;
+      var inner = (i % 3 === 0) ? r - 12 : r - 6;
+      ctx.beginPath();
+      ctx.moveTo(cx + r * Math.sin(a), cy - r * Math.cos(a));
+      ctx.lineTo(cx + inner * Math.sin(a), cy - inner * Math.cos(a));
+      ctx.strokeStyle = (i % 3 === 0) ? '#7a8aa0' : '#2a4060';
+      ctx.lineWidth = (i % 3 === 0) ? 1.5 : 1;
+      ctx.stroke();
+    }
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = (heading != null && !isNaN(heading)) ? '#00d4aa' : '#7a8aa0';
+    ctx.fillText('N', cx, cy - r + 14);
+    ctx.fillStyle = '#7a8aa0';
+    ctx.fillText('S', cx, cy + r - 14);
+    ctx.fillText('E', cx + r - 14, cy);
+    ctx.fillText('W', cx - r + 14, cy);
+    if (heading != null && !isNaN(heading)) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(heading * Math.PI / 180);
+      ctx.beginPath();
+      ctx.moveTo(0, -r + 4);
+      ctx.lineTo(-9, -r + 20);
+      ctx.lineTo(9, -r + 20);
+      ctx.closePath();
+      ctx.fillStyle = '#00d4aa';
+      ctx.shadowColor = '#00d4aa';
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.restore();
+    }
+    var el = document.getElementById('compass-heading');
+    el.innerHTML = (heading != null && !isNaN(heading)) ? heading.toFixed(1) + '&deg;' : '--';
+  }
+
+  function createVesselIcon(heading) {
+    if (heading == null || isNaN(heading)) {
+      return L.divIcon({
+        html: '<div style="width:16px;height:16px;border-radius:50%;background:#00d4aa;box-shadow:0 0 10px #00d4aa;border:2px solid rgba(0,212,170,0.6);"></div>',
+        iconSize: [16, 16], iconAnchor: [8, 8], className: ''
+      });
+    }
+    return L.divIcon({
+      html: '<div class="vessel-arrow" style="width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:20px solid #00d4aa;filter:drop-shadow(0 0 5px #00d4aa);transition:transform 0.25s ease;"></div>',
+      iconSize: [20, 24], iconAnchor: [10, 12], className: ''
+    });
+  }
+
+  function updateVesselMarker(lat, lon, heading) {
+    if (!vesselMarker) {
+      vesselMarker = L.marker([lat, lon], {
+        icon: createVesselIcon(heading), zIndexOffset: 1000
+      }).addTo(map);
+      vesselMarker.on('click', function() {
+        var hdg = (state.heading != null && !isNaN(state.heading)) ? state.heading.toFixed(1) + '&deg;' : '---';
+        var spd = (state.speed != null) ? state.speed.toFixed(1) + ' kn' : '---';
+        vesselMarker.bindPopup(
+          'Lat: ' + state.lat.toFixed(6) + '<br>' +
+          'Lon: ' + state.lon.toFixed(6) + '<br>' +
+          'Speed: ' + spd + '<br>' +
+          'Heading: ' + hdg + '<br>' +
+          'Depth: ' + (state.depth ? state.depth.toFixed(1) + ' m' : '---')
+        ).openPopup();
+      });
+    } else {
+      vesselMarker.setLatLng([lat, lon]);
+      var hasArrow = heading != null && !isNaN(heading);
+      var curHasArrow = vesselMarker.options.icon.options.html.indexOf('vessel-arrow') !== -1;
+      if (hasArrow !== curHasArrow) vesselMarker.setIcon(createVesselIcon(heading));
+    }
+    if (heading != null && !isNaN(heading)) {
+      var arr = document.querySelector('.vessel-arrow');
+      if (arr) arr.style.transform = 'rotate(' + heading + 'deg)';
+    }
+    if (state.follow) map.panTo([lat, lon], {animate: true, duration: 0.3});
+  }
+
+  function refreshTrack() {
+    if (state.trackPoints.length === 0) {
+      if (trackPolyline) { map.removeLayer(trackPolyline); trackPolyline = null; }
+      return;
+    }
+    if (!trackPolyline) {
+      trackPolyline = L.polyline(state.trackPoints, {
+        color: '#00d4aa', weight: 2, opacity: 0.7
+      }).addTo(map);
+    } else {
+      trackPolyline.setLatLngs(state.trackPoints);
+    }
+  }
+
+  function appendTrackPoint(lat, lon) {
+    state.trackPoints.push([lat, lon]);
+    if (state.trackPoints.length > 2000) {
+      state.trackPoints.splice(0, state.trackPoints.length - 2000);
+    }
+    refreshTrack();
+  }
+
+  function updateSidebarGPS(lat, lon, speed, heading) {
+    document.getElementById('gps-lat').textContent = lat.toFixed(6);
+    document.getElementById('gps-lon').textContent = lon.toFixed(6);
+    document.getElementById('gps-speed').textContent = (speed != null ? speed.toFixed(1) + ' kn' : '---');
+    var hdg = (heading != null && !isNaN(heading)) ? heading.toFixed(1) + '&deg; ' + degToCompass(heading) : '---';
+    document.getElementById('gps-heading').innerHTML = hdg;
+  }
+
+  function updateDepth(val) {
+    state.depth = val;
+    var el = document.getElementById('depth-value');
+    var cls = 'depth-value';
+    if (val < 10) cls += ' depth-green';
+    else if (val < 30) cls += ' depth-yellow';
+    else cls += ' depth-red';
+    el.className = cls;
+    el.innerHTML = val.toFixed(1) + ' <span class="unit">m</span>';
+  }
+
+  function updateBarometer(val) {
+    state.pressure = val;
+    document.getElementById('baro-value').innerHTML = val.toFixed(1) + ' <span class="unit">hPa</span>';
+  }
+
+  function updateDatarate() {
+    var now = Date.now();
+    state.msgTimestamps = state.msgTimestamps.filter(function(t) { return now - t < 5000; });
+    document.getElementById('datarate-rate').textContent = (state.msgTimestamps.length / 5).toFixed(1);
+    document.getElementById('datarate-last').textContent = fmtTime(state.lastMsgTime);
+  }
+
+  function setConnected(on) {
+    state.connected = on;
+    var dot = document.getElementById('status-dot');
+    var text = document.getElementById('status-text');
+    var overlay = document.getElementById('disconnect-overlay');
+    if (on) {
+      dot.className = 'live';
+      text.textContent = 'Live';
+      overlay.classList.remove('visible');
+    } else {
+      dot.className = 'dead';
+      overlay.classList.add('visible');
+    }
+  }
+
+  function stopReconnectTimers() {
+    if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  }
+
+  function startReconnect() {
+    stopReconnectTimers();
+    var countdown = 3;
+    document.getElementById('reconnect-countdown').textContent = '3';
+    countdownTimer = setInterval(function() {
+      countdown--;
+      if (countdown <= 0) { clearInterval(countdownTimer); countdownTimer = null; return; }
+      document.getElementById('reconnect-countdown').textContent = countdown;
+    }, 1000);
+    reconnectTimer = setInterval(function() {
+      stopReconnectTimers();
+      connectWS();
+    }, 3000);
+  }
+
+  function connectWS() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    var url = 'ws://' + hostPort() + '/ws';
+    ws = new WebSocket(url);
+    ws.onopen = function() {
+      setConnected(true);
+      stopReconnectTimers();
+      document.getElementById('reconnect-countdown').textContent = '3';
+    };
+    ws.onmessage = function(e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch(x) { return; }
+      state.msgTimestamps.push(Date.now());
+      state.lastMsgTime = Date.now();
+      updateDatarate();
+      switch (data.type) {
+        case 'history':
+          // Server sends {type:"history", data:{gps:[...], pressure:[...], barometer:[...]}}
+          var hd = data.data;
+          if (hd) {
+            if (hd.gps && hd.gps.length) {
+              var g = hd.gps[hd.gps.length-1];
+              state.lat = g.lat; state.lon = g.lon;
+              state.speed = g.speed_kn || 0;
+              state.heading = g.heading_deg != null ? g.heading_deg : null;
+              updateVesselMarker(state.lat, state.lon, state.heading);
+              updateSidebarGPS(state.lat, state.lon, state.speed, state.heading);
+              drawCompass(state.heading);
+            }
+            if (hd.pressure && hd.pressure.length) {
+              var p = hd.pressure[hd.pressure.length-1];
+              if (p.depth_m != null) updateDepth(p.depth_m);
+            }
+            if (hd.barometer && hd.barometer.length) {
+              var b = hd.barometer[hd.barometer.length-1];
+              if (b.pressure_hpa != null) updateBarometer(b.pressure_hpa);
+            }
+          }
+          break;
+        case 'gps':
+          if (data.lat != null && data.lon != null) {
+            state.lat = data.lat; state.lon = data.lon;
+            state.heading = data.heading_deg != null ? data.heading_deg : state.heading;
+            state.speed = data.speed_kn != null ? data.speed_kn : state.speed;
+            updateVesselMarker(state.lat, state.lon, state.heading);
+            updateSidebarGPS(state.lat, state.lon, state.speed, state.heading);
+            appendTrackPoint(state.lat, state.lon);
+            drawCompass(state.heading);
+          }
+          break;
+        case 'pressure':
+          if (data.depth_m != null) updateDepth(data.depth_m);
+          break;
+        case 'barometer':
+          if (data.pressure_hpa != null) updateBarometer(data.pressure_hpa);
+          break;
+      }
+    };
+    ws.onclose = function() {
+      setConnected(false);
+      startReconnect();
+    };
+    ws.onerror = function() {};
+  }
+
+  // ── Tile layers ──────────────────────────────────────────────
+  var baseLayers = {};   // mutually exclusive base maps
+  var overlays = {};     // independently toggleable overlays
+  var currentBase = 'seabed';
+
+  function ensureTiles() {
+    if (!baseLayers.osm) {
+      baseLayers.osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; <a href="https://openstreetmap.org">OSM</a>'
+      });
+    }
+    if (!baseLayers.seabed) {
+      // ESRI Ocean Basemap — free, global bathymetry with depth coloring
+      baseLayers.seabed = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 16, attribution: '&copy; <a href="https://www.esri.com">Esri</a> | GEBCO, NOAA, Garmin'
+      });
+    }
+    if (!baseLayers.satellite) {
+      baseLayers.satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 18, attribution: '&copy; <a href="https://www.esri.com">Esri</a>'
+      });
+    }
+    if (!overlays.nautical) {
+      // Full nautical chart (depth contours, lights, buoys — not just markers)
+      overlays.nautical = L.tileLayer('https://tiles.openseamap.org/seamap/{z}/{x}/{y}.png', {
+        maxZoom: 18, opacity: 0.75, attribution: '&copy; <a href="https://openseamap.org">OpenSeaMap</a>'
+      });
+    }
+    if (!overlays.seamarks) {
+      // Navigation markers overlay (buoys, beacons, lights)
+      overlays.seamarks = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
+        maxZoom: 18, opacity: 0.9, attribution: '&copy; <a href="https://openseamap.org">OpenSeaMap</a>'
+      });
+    }
+  }
+
+  function switchBase(name) {
+    ensureTiles();
+    // Remove current base
+    if (currentBase && baseLayers[currentBase] && map.hasLayer(baseLayers[currentBase])) {
+      map.removeLayer(baseLayers[currentBase]);
+    }
+    // Add new base
+    if (baseLayers[name]) {
+      baseLayers[name].addTo(map);
+      currentBase = name;
+    }
+    // Update button states
+    document.querySelectorAll('.map-btn-base').forEach(function(b) {
+      b.classList.toggle('active', b.getAttribute('data-layer') === name);
+    });
+  }
+
+  function toggleOverlay(name) {
+    ensureTiles();
+    var layer = overlays[name];
+    if (!layer) return;
+    if (map.hasLayer(layer)) {
+      map.removeLayer(layer);
+    } else {
+      layer.addTo(map);
+    }
+    var btn = document.querySelector('.map-btn-overlay[data-layer="' + name + '"]');
+    if (btn) btn.classList.toggle('active', map.hasLayer(layer));
+  }
+
+  function initMap(lat, lon) {
+    map = L.map('map', {center: [lat, lon], zoom: 14, zoomControl: true, attributionControl: true});
+    ensureTiles();
+    // Default: seabed basemap + nautical overlay
+    baseLayers.seabed.addTo(map);
+    overlays.nautical.addTo(map);
+
+    map.on('click', function(e) {
+      L.popup().setLatLng(e.latlng).setContent(e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6)).openOn(map);
+    });
+
+    // Layer controls
+    var baseCtrl = L.control({position: 'topleft'});
+    baseCtrl.onAdd = function() {
+      var div = L.DomUtil.create('div', 'leaflet-bar layer-ctrl');
+      div.innerHTML =
+        '<button class="map-btn-base active" data-layer="seabed">Seabed</button>' +
+        '<button class="map-btn-base" data-layer="osm">Map</button>' +
+        '<button class="map-btn-base" data-layer="satellite">Sat</button>' +
+        '<span style="margin:0 4px;color:#5a6a80;font-size:10px">|</span>' +
+        '<button class="map-btn-overlay active" data-layer="nautical">Chart</button>' +
+        '<button class="map-btn-overlay" data-layer="seamarks">Marks</button>';
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+    baseCtrl.addTo(map);
+
+    setTimeout(function() {
+      document.querySelectorAll('.map-btn-base').forEach(function(b) {
+        b.addEventListener('click', function() { switchBase(this.getAttribute('data-layer')); });
+      });
+      document.querySelectorAll('.map-btn-overlay').forEach(function(b) {
+        b.addEventListener('click', function() { toggleOverlay(this.getAttribute('data-layer')); });
+      });
+    }, 0);
+
+    // Follow control
+    var followCtrl = L.control({position: 'topright'});
+    followCtrl.onAdd = function() {
+      var btn = L.DomUtil.create('button', 'leaflet-bar map-btn follow-btn active');
+      btn.innerHTML = 'Follow: ON';
+      L.DomEvent.disableClickPropagation(btn);
+      L.DomEvent.addListener(btn, 'click', function() {
+        state.follow = !state.follow;
+        btn.innerHTML = 'Follow: ' + (state.follow ? 'ON' : 'OFF');
+        btn.classList.toggle('active', state.follow);
+        if (state.follow && vesselMarker) map.panTo(vesselMarker.getLatLng(), {animate: true, duration: 0.3});
+      });
+      return btn;
+    };
+    followCtrl.addTo(map);
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var initLat = 59.4370, initLon = 10.6550;
+    fetch('/api/state')
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.lat != null && d.lon != null) {
+          initLat = d.lat; initLon = d.lon;
+          state.lat = d.lat; state.lon = d.lon;
+          state.speed = d.speed_kn || 0;
+          state.heading = d.heading_deg != null ? d.heading_deg : null;
+        }
+      })
+      .catch(function() {})
+      .then(function() {
+        initMap(initLat, initLon);
+        return fetch('/api/track');
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(geojson) {
+	        if (geojson && geojson.type === 'Feature' && geojson.geometry) {
+	          var coords = geojson.geometry.coordinates || [];
+	          coords.forEach(function(c) {
+	            if (Array.isArray(c) && c.length >= 2) state.trackPoints.push([c[1], c[0]]);
+	          });
+	        }
+        refreshTrack();
+      })
+      .catch(function() {})
+      .then(function() {
+        updateVesselMarker(state.lat, state.lon, state.heading);
+        updateSidebarGPS(state.lat, state.lon, state.speed, state.heading);
+        drawCompass(state.heading);
+        connectWS();
+      });
+  });
+})();
+</script>
+</body>
+</html>
