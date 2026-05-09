@@ -21,6 +21,23 @@ try:
     from src.bathymetry import get_depth, grid_info
 except ImportError:
     from bathymetry import get_depth, grid_info  # fallback for pytest from src/
+
+# Teammate estimation tools
+from dvl_correction.src.magnetometer import (
+    MagnetometerCalibration,
+    MagnetometerCorrectionLayer,
+    MagnetometerQualityConfig,
+    RawMagnetometerMeasurement,
+)
+from dvl_correction.src.dvl_imu_kalman import (
+    DvlImuKalmanLayer,
+    ImuSample,
+    KalmanConfig,
+    NavigationOutput,
+)
+
+from src.replay import SimrisReplay
+
 import os
 import time
 from collections import defaultdict, deque
@@ -42,6 +59,7 @@ SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
 SIMULATOR_DISABLED = (
     os.environ.get("DISABLE_SIMULATOR", "0").lower() in {"1", "true", "yes"}
 )
+
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -49,9 +67,9 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 SENSOR_NAMES = {"accelerometer", "magnetometer", "gyroscope", "orientation", "barometer"}
 
-# Simulated survey pattern (Karlskrona archipelago — Aspöfjärden)
-BASE_LAT = 56.1300
-BASE_LON = 15.5800
+# Real data location — Simrishamn field test
+BASE_LAT = 55.5601
+BASE_LON = 14.3626
 SURVEY_SPEED_MS = 2.0          # m/s
 SURVEY_LEG_LENGTH = 200.0      # metres per long leg
 SURVEY_LEG_SPACING = 20.0      # metres between passes
@@ -149,6 +167,16 @@ class AppState:
         self.dr_lat: float | None = None
         self.dr_lon: float | None = None
         self.dr_heading: float = 0.0
+
+        # Teammate estimation tools
+        self.kf: DvlImuKalmanLayer = DvlImuKalmanLayer(config=KalmanConfig())
+        self.mag_correction: MagnetometerCorrectionLayer = MagnetometerCorrectionLayer()
+        self.kf_output: NavigationOutput | None = None
+        self.kf_covariance: list[list[float]] = [[1.0, 0.0], [0.0, 1.0]]
+
+        # Real data replay
+        self.replay: SimrisReplay = SimrisReplay()
+        self.replay_task: asyncio.Task[None] | None = None
         self.dr_last_gps_speed_kn: float = 0.0
 
         # Magnetometer calibration
@@ -200,24 +228,44 @@ def _recalc_drift() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lifespan (start / stop simulator)
+# Replay runner
+# ---------------------------------------------------------------------------
+
+
+async def _replay_runner(replay: SimrisReplay, speed: float = 1.0) -> None:
+    """Run the Simris replay pipeline, feeding data to internal handlers."""
+
+    async def on_gps(event: dict) -> None:
+        await post_gps(GpsData(lat=event["lat"], lon=event["lon"]))
+
+    async def on_imu(event: dict) -> None:
+        await post_data(DataPayload(payload=[
+            SensorValue(name="accelerometer", values=event["accelerometer"]),
+            SensorValue(name="gyroscope", values=event["gyroscope"]),
+            SensorValue(name="magnetometer", values=event["magnetometer"]),
+        ]))
+
+    async for _ in replay.replay(speed=speed, on_gps=on_gps, on_imu=on_imu):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):  # noqa: ARG001
-    if not SIMULATOR_DISABLED:
-        state.simulator_task = asyncio.create_task(_simulator_loop())
-        state.waypoints = [
-            {"id": 1, "lat": BASE_LAT, "lon": BASE_LON, "name": "A", "depth_m": round(get_depth(BASE_LAT, BASE_LON) or 0, 1)},
-            {"id": 2, "lat": BASE_LAT, "lon": BASE_LON + 0.008, "name": "B", "depth_m": round(get_depth(BASE_LAT, BASE_LON + 0.008) or 0, 1)},
-            {"id": 3, "lat": BASE_LAT + 0.005, "lon": BASE_LON + 0.008, "name": "C", "depth_m": round(get_depth(BASE_LAT + 0.005, BASE_LON + 0.008) or 0, 1)},
-        ]
-        state.waypoint_next_id = 4
     yield
     if state.simulator_task is not None:
         state.simulator_task.cancel()
         try:
             await state.simulator_task
+        except asyncio.CancelledError:
+            pass
+    if state.replay_task is not None:
+        state.replay_task.cancel()
+        try:
+            await state.replay_task
         except asyncio.CancelledError:
             pass
 
@@ -555,6 +603,47 @@ async def export_csv():
     rows += [f"{e.get('timestamp', '')},survey,{e['lat']},{e['lon']},{e.get('heading_deg', '')},{e.get('speed_kn', '')}," for e in state.track_buffer]
     rows += [f"{e.get('timestamp', '')},support,{e['lat']},{e['lon']},{e.get('heading_deg', '')},{e.get('speed_kn', '')}," for e in state.vessel2_track]
     return Response(content="\n".join(rows), media_type="text/csv")
+
+
+# ---------------------------------------------------------------------------
+# Real-data replay API
+# ---------------------------------------------------------------------------
+
+
+class ReplaySpeed(BaseModel):
+    speed: float = Field(default=1.0, ge=0.1, le=1000.0)
+
+
+@app.post("/api/replay/start")
+async def replay_start(body: ReplaySpeed):
+    """Start replaying the Simris field dataset at the given speed multiplier."""
+    if state.replay.running:
+        return {"status": "already_running", "speed": body.speed}
+    state.replay = SimrisReplay()
+    async def _run():
+        await _replay_runner(state.replay, speed=body.speed)
+    state.replay_task = asyncio.create_task(_run())
+    return {"status": "started", "speed": body.speed}
+
+
+@app.post("/api/replay/stop")
+async def replay_stop():
+    """Stop an active replay."""
+    state.replay.stop()
+    if state.replay_task is not None:
+        state.replay_task.cancel()
+        try:
+            await state.replay_task
+        except asyncio.CancelledError:
+            pass
+        state.replay_task = None
+    return {"status": "stopped"}
+
+
+@app.get("/api/replay/status")
+async def replay_status():
+    """Return current replay status."""
+    return state.replay.get_status()
 
 # ---------------------------------------------------------------------------
 # GPS Denial & Dead Reckoning

@@ -38,7 +38,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 #status-bar{position:absolute;bottom:0;left:0;right:0;z-index:15;height:32px;background:rgba(10,22,40,0.95);border-top:1px solid rgba(0,212,170,0.15);display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:11px}
 #status-left{color:#7a8aa0}
 #status-right{display:flex;align-items:center;gap:10px}
-#sim-banner{background:rgba(212,160,0,0.2);color:#d4a000;border:1px solid rgba(212,160,0,0.3);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+#sim-banner{background:rgba(212,160,0,0.2);color:#d4a000;border:1px solid rgba(212,160,0,0.3);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}#data-source{background:rgba(0,212,170,0.15);color:#00d4aa;border:1px solid rgba(0,212,170,0.25);border-radius:3px;padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
 #status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
 #status-dot.live{background:#00d46a;box-shadow:0 0 6px #00d46a}
 #status-dot.dead{background:#d44040;box-shadow:0 0 6px #d44040}
@@ -142,20 +142,23 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       <span id="rec-time" style="font-size:11px;color:#00d4aa;display:none">00:00</span>
     </div>
   </div>
-  <div class="panel" id="replay-panel" style="display:none">
+  <div class="panel" id="replay-panel">
     <div class="panel-title">Replay</div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-      <button onclick="window.startReplay()" style="background:none;border:1px solid rgba(0,212,170,0.3);color:#d0d8e8;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:13px">&#9654;</button>
-      <button onclick="window.pauseReplay()" style="background:none;border:1px solid rgba(0,212,170,0.3);color:#d0d8e8;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:13px">&#9208;</button>
-      <button onclick="window.stopReplay()" style="background:none;border:1px solid rgba(0,212,170,0.3);color:#d0d8e8;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:13px">&#9632;</button>
-      <input type="range" id="replay-scrubber" min="0" max="1000" value="0" style="flex:1;height:4px;accent-color:#00d4aa" oninput="window.seekReplay(this.value)">
-      <span id="replay-time" style="color:#7a8aa0;font-family:monospace;font-size:10px;min-width:80px;text-align:right">00:00 / 00:00</span>
+      <button onclick="window.startReplay()" style="background:none;border:1px solid rgba(0,212,170,0.3);color:#d0d8e8;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:13px">&#9654; Start Replay</button>
+      <button onclick="window.stopReplay()" style="background:none;border:1px solid rgba(212,64,64,0.3);color:#d44040;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:13px">&#9632; Stop</button>
+    </div>
+    <div style="margin-top:6px;height:4px;background:#1a3050;border-radius:2px">
+      <div id="replay-progress" style="height:100%;width:0%;background:#00d4aa;border-radius:2px;transition:width 0.3s"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+      <span id="replay-time" style="color:#7a8aa0;font-family:monospace;font-size:10px;min-width:80px">00:00 / 00:00</span>
     </div>
     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:10px">
       <span style="color:#7a8aa0">Speed:</span>
       <button class="replay-speed active" onclick="window.setReplaySpeed(1)">1x</button>
-      <button class="replay-speed" onclick="window.setReplaySpeed(2)">2x</button>
       <button class="replay-speed" onclick="window.setReplaySpeed(5)">5x</button>
+      <button class="replay-speed" onclick="window.setReplaySpeed(10)">10x</button>
     </div>
   </div>
   <div class="panel">
@@ -190,7 +193,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 <div id="status-bar">
   <div id="status-left">MARITIME MISSION PLANNER &mdash; Demo 5: Command Center</div>
   <div id="status-right">
-    <span id="sim-banner">SIMULATED DATA</span>
+    <span id="sim-banner">SIMULATED DATA</span><span id="data-source" style="display:none">DATA: Live</span>
     <span id="gpsdeny-banner">GPS DENIED — Dead Reckoning</span>
     <span><span id="status-dot" class="connecting"></span><span id="status-text">Connecting...</span></span>
     <span id="rec-badge">REC</span>
@@ -206,9 +209,9 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"></script>
 <script>
 (function(){'use strict';
-var state={lat:56.130,lon:15.580,speed:0,heading:null,depth:0,pressure:0,follow:false,trackPoints:[],msgTimestamps:[],lastMsgTime:null,connected:false};
+var state={lat:55.560,lon:14.363,speed:0,heading:null,depth:0,pressure:0,follow:false,trackPoints:[],msgTimestamps:[],lastMsgTime:null,connected:false};
 var v2={lat:null,lon:null,heading:null,speed:null,trackPoints:[]};
-var recording=false,recStartTime=null,recTimer=null,replayData=null,replayState=null;
+var recording=false,recStartTime=null,recTimer=null,showingReplay=false,replayPoller=null;
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
 var gpsDenied=false,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
@@ -233,6 +236,10 @@ document.getElementById('compass-heading').innerHTML=(heading!=null&&!isNaN(head
 }
 
 // Ellipse math from 2x2 covariance matrix
+function createDeniedVesselIcon(heading){
+  if(heading==null||isNaN(heading))return L.divIcon({html:'<div style="width:16px;height:16px;border-radius:50%;border:2px solid rgba(212,64,64,0.6);background:rgba(212,64,64,0.15);"></div>',iconSize:[16,16],iconAnchor:[8,8],className:''});
+  return L.divIcon({html:'<div class="vessel-denied-arrow" style="transform:rotate('+heading+'deg)"></div>',iconSize:[20,24],iconAnchor:[10,12],className:''});
+}
 function ellipseFromCov(cov){
   var trace=cov[0][0]+cov[1][1];
   var det=cov[0][0]*cov[1][1]-cov[0][1]*cov[1][0];
@@ -274,8 +281,16 @@ function setGpsDeniedState(denied){
   btn.className=denied?'denied':'gps-active';
   btn.innerHTML=denied?'GPS: DENIED':'GPS: ACTIVE';
   timer.style.display=denied?'':'none';
-  if(denied){drDeniedStart=Date.now();updateDRTimer();fetchDeadReckon();drTimer=setInterval(function(){fetchDeadReckon();updateDRTimer();},2000);}
-  else{timer.textContent='00:00';banner.className='';document.getElementById('pos-source').className='';document.getElementById('pos-source').textContent='GPS';document.getElementById('pos-uncertainty').textContent='0.0m';stopDR();}
+  if(denied){
+    if(vesselMarker){vesselMarker.setIcon(createDeniedVesselIcon(state.heading));}
+    drDeniedStart=Date.now();updateDRTimer();fetchDeadReckon();
+    drTimer=setInterval(function(){fetchDeadReckon();updateDRTimer();},2000);
+  }else{
+    timer.textContent='00:00';banner.className='';
+    document.getElementById('pos-source').className='';document.getElementById('pos-source').textContent='GPS';
+    document.getElementById('pos-uncertainty').textContent='0.0m';
+    var sb=document.getElementById('sim-banner');if(sb)sb.style.display='';stopDR();
+  }
 }
 function updateDRTimer(){
   if(!drDeniedStart)return;
@@ -394,32 +409,25 @@ document.getElementById('fleet-count').textContent=(v2.lat!=null?2:1)+' vessel'+
 function updateDepth(val){state.depth=val;var el=document.getElementById('depth-value');el.className='depth-value'+(val<10?' depth-green':val<30?' depth-yellow':' depth-red');el.innerHTML=val.toFixed(1)+' <span class="unit">m</span>';}
 function updateBarometer(val){state.pressure=val;document.getElementById('baro-value').innerHTML=val.toFixed(1)+' <span class="unit">hPa</span>';}
 function updateDatarate(){var now=Date.now();state.msgTimestamps=state.msgTimestamps.filter(function(t){return now-t<5000;});document.getElementById('datarate-rate').textContent=(state.msgTimestamps.length/5).toFixed(1);document.getElementById('datarate-last').textContent=fmtTime(state.lastMsgTime);}
-function setConnected(on){state.connected=on;var dot=document.getElementById('status-dot');var text=document.getElementById('status-text');var overlay=document.getElementById('disconnect-overlay');if(on){dot.className='live';text.textContent='Live';overlay.classList.remove('visible');}else{dot.className='dead';overlay.classList.add('visible');}}
+function setConnected(on){state.connected=on;updateDataSource();var dot=document.getElementById('status-dot');var text=document.getElementById('status-text');var overlay=document.getElementById('disconnect-overlay');if(on){dot.className='live';text.textContent='Live';overlay.classList.remove('visible');}else{dot.className='dead';overlay.classList.add('visible');}}
 function stopReconnectTimers(){if(reconnectTimer){clearInterval(reconnectTimer);reconnectTimer=null;}if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}}
 function startReconnect(){stopReconnectTimers();var cd=3;document.getElementById('reconnect-countdown').textContent='3';countdownTimer=setInterval(function(){cd--;if(cd<=0){clearInterval(countdownTimer);countdownTimer=null;return;}document.getElementById('reconnect-countdown').textContent=cd;},1000);reconnectTimer=setInterval(function(){stopReconnectTimers();connectWS();},3000);}
 
 // Recording
 function toggleRecording(){
 if(recording){fetch('/api/recording/stop').catch(function(){});recording=false;if(recTimer){clearInterval(recTimer);recTimer=null;}
-document.getElementById('rec-btn').className='';document.getElementById('rec-btn').textContent='● Record';document.getElementById('rec-status').textContent='Stopped';document.getElementById('rec-time').style.display='none';document.getElementById('replay-panel').style.display='';}
-else{fetch('/api/recording/start').catch(function(){});recording=true;recStartTime=Date.now();document.getElementById('rec-btn').className='recording';document.getElementById('rec-btn').textContent='● Stop';document.getElementById('rec-status').textContent='Recording';document.getElementById('rec-time').style.display='';document.getElementById('rec-time').textContent='00:00';document.getElementById('replay-panel').style.display='none';recTimer=setInterval(function(){document.getElementById('rec-time').textContent=fmtDuration(Date.now()-recStartTime);},200);}
+document.getElementById('rec-btn').className='';document.getElementById('rec-btn').textContent='● Record';document.getElementById('rec-status').textContent='Stopped';document.getElementById('rec-time').style.display='none';document.getElementById('rec-badge').className='';}
+else{fetch('/api/recording/start').catch(function(){});recording=true;recStartTime=Date.now();document.getElementById('rec-btn').className='recording';document.getElementById('rec-btn').textContent='● Stop';document.getElementById('rec-status').textContent='Recording';document.getElementById('rec-time').style.display='';document.getElementById('rec-time').textContent='00:00';document.getElementById('rec-badge').className='visible';recTimer=setInterval(function(){document.getElementById('rec-time').textContent=fmtDuration(Date.now()-recStartTime);},200);}
 }
 
 // Replay
-function startReplay(){fetch('/api/recording/playback').then(function(r){return r.json();}).then(function(d){
-if(!d||!d.waypoints||!d.waypoints.length)return;replayData=d;replayState={playing:true,speed:1,startTime:d.start_time,endTime:d.end_time,wallStart:Date.now(),offset:0,idx:0};
-document.getElementById('replay-badge').style.display='';document.getElementById('replay-time').textContent='00:00 / '+fmtDuration(d.end_time-d.start_time);replayTick();}).catch(function(){});}
-function replayTick(){if(!replayState||!replayState.playing||!replayData){replaySchedule();return;}
-var elapsed=(Date.now()-replayState.wallStart)*replayState.speed;var curTime=replayState.offset+elapsed;var totalDur=replayData.end_time-replayData.start_time;
-if(curTime>=totalDur){stopReplay();return;}var wps=replayData.waypoints,idx=0;for(var i=0;i<wps.length;i++){if(wps[i].t!=null&&wps[i].t<=curTime)idx=i;}
-replayState.idx=idx;var wp=wps[idx];if(wp){if(wp.lat!=null){updateVesselMarker(wp.lat,wp.lon,wp.heading_deg);appendTrackPoint(wp.lat,wp.lon);}if(wp.v2_lat!=null){updateVessel2Marker(wp.v2_lat,wp.v2_lon,wp.v2_heading_deg);appendV2TrackPoint(wp.v2_lat,wp.v2_lon);}}
-document.getElementById('replay-scrubber').value=Math.min(totalDur>0?(curTime/totalDur*1000):0,1000);
-document.getElementById('replay-time').textContent=fmtDuration(curTime)+' / '+fmtDuration(totalDur);replaySchedule();}
-function replaySchedule(){if(replayState&&replayState.playing)setTimeout(replayTick,100);}
-function pauseReplay(){if(!replayState)return;replayState.playing=!replayState.playing;if(replayState.playing){var idx=Math.min(replayState.idx,(replayData.waypoints.length-1));replayState.wallStart=Date.now();replayState.offset=replayData.waypoints[idx].t||0;replayTick();}}
-function stopReplay(){if(replayState)replayState.playing=false;replayData=null;replayState=null;document.getElementById('replay-badge').style.display='none';}
-function seekReplay(val){if(!replayData||!replayState)return;var pct=val/1000,totalDur=replayData.end_time-replayData.start_time;replayState.wallStart=Date.now();replayState.offset=pct*totalDur;replayState.playing=true;}
-function setReplaySpeed(s){if(replayState)replayState.speed=s;document.querySelectorAll('.replay-speed').forEach(function(b){b.classList.toggle('active',parseInt(b.textContent)===s);});}
+function startReplay(){if(showingReplay)return;fetch('/api/replay/start',{method:'POST'}).then(function(){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}).catch(function(){});}
+function pollReplayStatus(){if(!showingReplay)return;fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){var p=d.progress||0;document.getElementById('replay-progress').style.width=Math.min(p*100,100)+'%';document.getElementById('replay-time').textContent=fmtDuration(d.elapsed_ms||0)+' / '+fmtDuration(d.duration_ms||0);setTimeout(pollReplayStatus,500);}else{stopReplay();}}).catch(function(){setTimeout(pollReplayStatus,1000);});}
+function pauseReplay(){stopReplay();}
+function stopReplay(){showingReplay=false;fetch('/api/replay/stop',{method:'POST'}).catch(function(){});updateDataSource();document.getElementById('replay-badge').style.display='none';}
+function seekReplay(val){}
+function setReplaySpeed(s){fetch('/api/replay/speed?multiplier='+s,{method:'POST'}).catch(function(){});document.querySelectorAll('.replay-speed').forEach(function(b){b.classList.toggle('active',parseInt(b.textContent)===s);});}
+function updateDataSource(){var el=document.getElementById('data-source');var sim=document.getElementById('sim-banner');if(showingReplay){el.style.display='inline';el.textContent='REAL DATA — Simris Field Test — 2min real data';sim.style.display='none';}else if(state.connected){el.style.display='inline';el.textContent='DATA: Live';sim.style.display='none';}else{el.style.display='none';sim.style.display='';}}
 
 // Export
 function triggerDownload(url,name){fetch(url).then(function(r){return r.blob();}).then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}).catch(function(){});}
@@ -458,7 +466,7 @@ ws.onerror=function(){};
 
 // Map Init
 function initMap(lat,lon){
-map=L.map('map',{center:[lat,lon],zoom:14,zoomControl:true,attributionControl:true});
+map=L.map('map',{center:[lat,lon],zoom:16,zoomControl:true,attributionControl:true});
 riskLayerGroup.addTo(map);ensureTiles();baseLayers.seabed.addTo(map);overlays.nautical.addTo(map);
 map.on('click',function(e){var ll=e.latlng;var content=ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br><span style="color:#7a8aa0">Fetching depth...</span>';var popup=L.popup().setLatLng(ll).setContent(content).openOn(map);fetch('/api/depth?lat='+ll.lat.toFixed(6)+'&lon='+ll.lng.toFixed(6)).then(function(r){return r.json();}).then(function(d){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br>Depth: <b>'+(d.depth_m?d.depth_m.toFixed(1)+' m':'no data / land')+'</b>');}).catch(function(){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6));});});
 map.on('dragstart',function(){if(state.follow){state.follow=false;var fb=document.querySelector('.follow-btn');if(fb){fb.innerHTML='Follow: OFF';fb.classList.remove('active');}}});
@@ -477,7 +485,7 @@ wpEditBtn.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-bt
 wpEditBtn.addTo(map);
 
 var wpMode=false;
-map.on('click',function(e){if(!wpMode)return;var lat=e.latlng.lat,lon=e.latlng.lng;var popup=L.popup().setLatLng(e.latlng).setContent('Adding waypoint...').openOn(map);fetch('/api/waypoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:lat,lon:lon})}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||'Land');});return r.json();}).then(function(wp){map.closePopup(popup);addWaypointMarker(wp);fetchRisk();}).catch(function(err){map.closePopup(popup);showToast(err.message.indexOf('land')!==-1||err.message.indexOf('shallow')!==-1?'Cannot place here — on land or too shallow for USV':err.message);});});
+map.on('click',function(e){if(!wpMode)return;if(wpMarkers.length>=50){showToast('Max 50 waypoints');return;}var lat=e.latlng.lat,lon=e.latlng.lng;var popup=L.popup().setLatLng(e.latlng).setContent('Adding waypoint...').openOn(map);fetch('/api/waypoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:lat,lon:lon})}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||'Land');});return r.json();}).then(function(wp){map.closePopup(popup);addWaypointMarker(wp);fetchRisk();}).catch(function(err){map.closePopup(popup);showToast(err.message.indexOf('land')!==-1||err.message.indexOf('shallow')!==-1?'Cannot place here — on land or too shallow for USV':err.message);});});
 }
 
 function showToast(msg){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:30;background:rgba(212,64,64,0.9);color:#fff;padding:8px 18px;border-radius:6px;font-size:12px;transition:opacity 0.3s;pointer-events:none';document.body.appendChild(t);}t.textContent=msg;t.style.opacity='1';clearTimeout(t._timer);t._timer=setTimeout(function(){t.style.opacity='0';},2500);}
@@ -494,16 +502,15 @@ function renderWpList(){var el=document.getElementById('wp-list');if(!wpMarkers.
 // Risk
 function riskColor(score){if(score<0.3)return'#00d46a';if(score<0.6)return'#d4a000';return'#d44040';}
 function updateRiskPolyline(segments){riskLayerGroup.clearLayers();if(!segments||!segments.length)return;var coords=wpMarkers.map(function(m){return[m.getLatLng().lat,m.getLatLng().lng];});if(coords.length<2)return;for(var i=0;i<segments.length&&i<coords.length-1;i++){var seg=segments[i];var line=L.polyline([coords[i],coords[i+1]],{color:riskColor(seg.risk_score),weight:3,opacity:0.8});line.bindTooltip('WP'+seg.from_id+' -> '+seg.to_id+': '+seg.distance_m.toFixed(0)+'m | Risk: '+(seg.risk_score*100).toFixed(0)+'% | Depth: '+(seg.avg_depth_m||'?')+'m',{sticky:true});riskLayerGroup.addLayer(line);}}
-function fetchRisk(){fetch('/api/risk').then(function(r){return r.json();}).then(function(data){updateRiskPolyline(data.segments);var score=data.mission_risk;var el=document.getElementById('risk-score');var bar=document.getElementById('risk-bar');var cls=score<0.3?'risk-low':score<0.6?'risk-med':'risk-high';el.textContent=(score*100).toFixed(0)+'%';el.className=cls;bar.style.background='linear-gradient(to right, #00d46a, #d4a000 '+(score*100)+'%, #1a3050 '+(score*100)+'%)';bar.style.width='100%';if(data.imu){document.getElementById('risk-drift').textContent=data.imu.drift_rate_dps.toFixed(3)+'/s';document.getElementById('risk-gps-age').textContent=data.imu.last_gps_sec.toFixed(0)+'s';}}).catch(function(){});}
+function fetchRisk(){fetch('/api/risk').then(function(r){return r.json();}).then(function(data){updateRiskPolyline(data.segments);var score=data.mission_risk;var el=document.getElementById('risk-score');var bar=document.getElementById('risk-bar');var cls=score<0.3?'risk-low':score<0.6?'risk-med':'risk-high';el.textContent=(score*100).toFixed(0)+'%';el.className=cls;bar.style.background='linear-gradient(to right, #00d46a, #d4a000 '+(score*100)+'%, #1a3050 100%)';bar.style.width='100%';if(data.imu){document.getElementById('risk-drift').textContent=data.imu.drift_rate_dps.toFixed(3)+'/s';document.getElementById('risk-gps-age').textContent=data.imu.last_gps_sec.toFixed(0)+'s';}}).catch(function(){});}
 
-// GPS Denial + Dead Reckoning
-var gpsDenied=false,drMarker=null,ellipsePolygon=null,drTimer=null;
-function toggleGpsDenial(){var btn=document.getElementById('gpsdeny-btn'),timer=document.getElementById('gpsdeny-timer'),ep=gpsDenied?'/api/gps-deny/off':'/api/gps-deny/on';fetch(ep).then(function(r){return r.json();}).then(function(){gpsDenied=!gpsDenied;if(gpsDenied){btn.textContent='GPS: DENIED';btn.style.background='rgba(212,64,64,0.2)';btn.style.borderColor='#d44040';btn.style.color='#d44040';timer.style.display='';document.getElementById('pos-source').textContent='Dead Reckon';document.getElementById('pos-source').style.color='#f0c040';pollDr();drTimer=setInterval(pollDr,2000);}else{btn.textContent='GPS: ACTIVE';btn.style.background='rgba(0,212,100,0.15)';btn.style.borderColor='#00d46a';btn.style.color='#00d46a';timer.style.display='none';document.getElementById('pos-source').textContent='GPS';document.getElementById('pos-source').style.color='#00d4aa';document.getElementById('pos-uncertainty').textContent='0.0m';clearDr();}});}
-function pollDr(){fetch('/api/dead-reckon').then(function(r){return r.json();}).then(function(d){if(!gpsDenied)return;var s=d.seconds_since_gps||0,m=Math.floor(s/60),ss=Math.floor(s%60);document.getElementById('gpsdeny-timer').textContent=String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0');document.getElementById('pos-uncertainty').textContent=(d.uncertainty_m||0).toFixed(1)+'m';if(d.dr_lat!=null&&d.dr_lon!=null){if(!drMarker){drMarker=L.marker([d.dr_lat,d.dr_lon],{icon:L.divIcon({html:'<div style="width:12px;height:12px;border-radius:50%;background:#f0c040;border:2px dashed #d4a000;box-shadow:0 0 6px #f0c040"></div>',iconSize:[12,12],iconAnchor:[6,6],className:''}),zIndexOffset:900}).addTo(map);}else{drMarker.setLatLng([d.dr_lat,d.dr_lon]);}}drawEllipse(d);});}
-function drawEllipse(d){if(ellipsePolygon){map.removeLayer(ellipsePolygon);ellipsePolygon=null;}var el=d.uncertainty_ellipse;if(!el||!el.semi_major||el.semi_major<0.5)return;var lat=d.dr_lat||state.lat,lon=d.dr_lon||state.lon,pts=[],dlat=1/111320,dlon=1/(111320*Math.cos(lat*Math.PI/180)),ar=(el.angle_deg||0)*Math.PI/180;for(var i=0;i<=48;i++){var t=i/48*2*Math.PI,ex=el.semi_major*Math.cos(t),ey=el.semi_minor*Math.sin(t),rx=ex*Math.cos(ar)-ey*Math.sin(ar),ry=ex*Math.sin(ar)+ey*Math.cos(ar);pts.push([lat+ry*dlat,lon+rx*dlon]);}ellipsePolygon=L.polygon(pts,{color:'#f0c040',weight:1.5,dashArray:'4 3',opacity:0.7,fillColor:'#f0c040',fillOpacity:0.12}).addTo(map);}
-function clearDr(){if(drTimer){clearInterval(drTimer);drTimer=null;}if(drMarker){map.removeLayer(drMarker);drMarker=null;}if(ellipsePolygon){map.removeLayer(ellipsePolygon);ellipsePolygon=null;}document.getElementById('gpsdeny-timer').style.display='none';}
+function checkGpsDenialStatus(){
+  fetch('/api/gps-deny/status').then(function(r){return r.json();}).then(function(d){
+    if(d.denied){setGpsDeniedState(true);}
+  }).catch(function(){});
+}
 // Init
-document.addEventListener('DOMContentLoaded',function(){var initLat=56.130,initLon=15.580;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);});
+document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
 });
 })();
 </script>

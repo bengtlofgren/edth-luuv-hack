@@ -1,10 +1,10 @@
-"""Bathymetry data for Karlskrona Skärgård — serves seabed depth queries.
+"""Bathymetry data for Swedish south-east coast — serves seabed depth queries.
 
 Synthetic but realistic depth grid based on known bathymetric features
-of the Karlskrona archipelago (Swedish Maritime Administration, EMODnet 2024).
+of the Simrishamn coastal area and Karlskrona archipelago.
 
 Resolution: ~0.001° (~60m grid at this latitude)
-Region: 56.05–56.30°N, 15.40–15.80°E
+Region: 55.40–56.30°N, 14.20–15.80°E
 """
 
 import time
@@ -14,8 +14,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Grid definition
 # ---------------------------------------------------------------------------
-LAT_MIN, LAT_MAX = 56.05, 56.30
-LON_MIN, LON_MAX = 15.40, 15.80
+LAT_MIN, LAT_MAX = 55.40, 56.30
+LON_MIN, LON_MAX = 14.20, 15.80
 RES = 0.001  # degrees (~60m at 56°N)
 NLAT = int((LAT_MAX - LAT_MIN) / RES) + 1
 NLON = int((LON_MAX - LON_MIN) / RES) + 1
@@ -31,8 +31,44 @@ def _build_grid() -> np.ndarray:
     lon_grid, lat_grid = np.meshgrid(lons, lats)
 
     # --- Depth control points (lat, lon, depth_m) ---
-    # Karlskrona skärgård — based on Swedish Maritime Administration chart data
+    # Simrishamn coastal area (south-east Skåne)
     control_points = [
+        # Simrishamn coastal zone (55.56°N, 14.36°E)
+        (55.54, 14.34, 5.0),
+        (55.54, 14.36, 10.0),
+        (55.54, 14.38, 18.0),
+        (55.54, 14.40, 28.0),
+        (55.54, 14.43, 40.0),
+        (55.54, 14.46, 50.0),
+        (55.55, 14.34, 5.0),
+        (55.55, 14.36, 8.0),
+        (55.55, 14.38, 15.0),
+        (55.55, 14.40, 25.0),
+        (55.55, 14.43, 38.0),
+        (55.55, 14.46, 48.0),
+        (55.56, 14.34, 5.0),
+        (55.56, 14.36, 8.0),
+        (55.56, 14.38, 12.0),
+        (55.56, 14.40, 22.0),
+        (55.56, 14.43, 35.0),
+        (55.56, 14.46, 45.0),
+        (55.57, 14.34, 5.0),
+        (55.57, 14.36, 6.0),
+        (55.57, 14.38, 10.0),
+        (55.57, 14.40, 20.0),
+        (55.57, 14.43, 32.0),
+        (55.57, 14.46, 42.0),
+        # Deeper offshore Simrishamn
+        (55.54, 14.48, 52.0),
+        (55.55, 14.48, 50.0),
+        (55.56, 14.48, 48.0),
+        (55.57, 14.48, 45.0),
+        # Transition south
+        (55.52, 14.40, 35.0),
+        (55.52, 14.45, 48.0),
+        (55.50, 14.40, 38.0),
+        (55.50, 14.45, 50.0),
+        # Karlskrona skärgård — based on Swedish Maritime Administration chart data
         # Baltic approach (south of archipelago — open sea)
         (56.06, 15.55, 70.0),
         (56.06, 15.60, 72.0),
