@@ -55,6 +55,7 @@ import uvicorn
 
 BUFFER_SIZE = 300
 SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
+SIMULATOR_DISABLED = os.environ.get("DISABLE_SIMULATOR") == "1"
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -156,6 +157,9 @@ class AppState:
         self.recorded_frames: list[dict[str, Any]] = []
         self.recording_start_time: float = 0.0
         self.last_record_time: float = 0.0
+        self.mission_logs: dict[str, dict[str, Any]] = {}
+        self._replay_active: bool = False
+        self._replay_task: asyncio.Task[None] | None = None
 
         # GPS denial & dead reckoning
         self.gps_denied: bool = False
@@ -253,6 +257,40 @@ async def _replay_runner(replay: SimrisReplay, speed: float = 1.0) -> None:
 async def lifespan(application: FastAPI):  # noqa: ARG001
     if not SIMULATOR_DISABLED:
         state.simulator_task = asyncio.create_task(_simulator_loop())
+    # Pre-load simris field data as a selectable mission
+    try:
+        simris = SimrisReplay()
+        frames = []
+        rel0 = simris.timeline[0][0] if simris.timeline else 0
+        end_rel = simris.timeline[-1][0] if simris.timeline else 0
+        gps_idx, imu_idx = 0, 0
+        t = 0.0
+        while t <= end_rel:
+            while gps_idx < len(simris.gps_events) and simris.gps_events[gps_idx]["rel_time"] <= t:
+                gps_idx += 1
+            while imu_idx < len(simris.imu_events) and simris.imu_events[imu_idx]["rel_time"] <= t:
+                imu_idx += 1
+            gps = simris.gps_events[gps_idx - 1] if gps_idx > 0 else None
+            imu = simris.imu_events[imu_idx - 1] if imu_idx > 0 else None
+            mag_hdg = None
+            if imu:
+                mx, my = imu.get("mag_x", 0), imu.get("mag_y", 0)
+                if mx or my:
+                    mag_hdg = round(math.degrees(math.atan2(my, mx)) % 360.0, 1)
+            base_ts = simris.gps_events[0]["timestamp"] if simris.gps_events else 0.0
+            frames.append({
+                "timestamp": base_ts + t,
+                "rel_time": round(t, 1),
+                "lat": gps["lat"] if gps else None,
+                "lon": gps["lon"] if gps else None,
+                "heading_deg": 0.0, "speed_kn": 0.0,
+                "depth_m": None, "mag_heading": mag_hdg, "gps_denied": False,
+            })
+            t += 1.0
+        state.mission_logs["simris-field-test"] = {"frames": frames,
+            "duration_sec": round(frames[-1]["rel_time"], 1) if frames else 0, "source": "simris"}
+    except Exception:
+        pass
     yield
     if state.simulator_task is not None:
         state.simulator_task.cancel()
@@ -260,12 +298,7 @@ async def lifespan(application: FastAPI):  # noqa: ARG001
             await state.simulator_task
         except asyncio.CancelledError:
             pass
-    if state.replay_task is not None:
-        state.replay_task.cancel()
-        try:
-            await state.replay_task
-        except asyncio.CancelledError:
-            pass
+    _cancel_replay()
 
 # ---------------------------------------------------------------------------
 # FastAPI application
@@ -341,6 +374,7 @@ async def post_data(data: DataPayload):
                     state.dr_heading = state.mag_heading
             except Exception:
                 pass
+    _maybe_record_frame()
     return {"status": "ok"}
 
 @app.post("/gps")
@@ -370,24 +404,18 @@ async def post_gps(data: GpsData):
             state.kf_covariance = out.position_covariance[:2, :2].tolist()
     except Exception:
         pass
-
     if not state.gps_denied:
         await _broadcast({
-            "type": "gps",
-            "lat": data.lat,
-            "lon": data.lon,
-            "speed_kn": data.speed_kn,
-            "heading_deg": data.heading_deg,
+            "type": "gps", "lat": data.lat, "lon": data.lon,
+            "speed_kn": data.speed_kn, "heading_deg": data.heading_deg,
             "timestamp": _last_ts("gps"),
         })
         state.track_buffer.append({
-            "lat": data.lat,
-            "lon": data.lon,
-            "timestamp": _now(),
-            "speed_kn": data.speed_kn,
-            "heading_deg": data.heading_deg,
+            "lat": data.lat, "lon": data.lon, "timestamp": _now(),
+            "speed_kn": data.speed_kn, "heading_deg": data.heading_deg,
         })
         state.last_gps_time = _now()
+    _maybe_record_frame()
     return {"status": "ok"}
 
 @app.post("/pressure")
@@ -405,6 +433,7 @@ async def post_pressure(data: PressureData):
         "pressure_bar": data.pressure_bar,
         "timestamp": _last_ts("pressure"),
     })
+    _maybe_record_frame()
     return {"status": "ok"}
 
 # ---------------------------------------------------------------------------
@@ -576,6 +605,29 @@ async def get_risk():
     }
 
 
+def _maybe_record_frame() -> None:
+    """Capture a mission frame every second while recording."""
+    if not state.recording:
+        return
+    now = _now()
+    if now - state.last_record_time < 1.0:
+        return
+    state.last_record_time = now
+    gps_buf = state.buffers.get("gps")
+    pressure_buf = state.buffers.get("pressure")
+    last_gps = gps_buf[-1] if gps_buf else {}
+    last_depth = pressure_buf[-1] if pressure_buf else {}
+    state.recorded_frames.append({
+        "timestamp": now,
+        "rel_time": now - state.recording_start_time,
+        "lat": last_gps.get("lat"), "lon": last_gps.get("lon"),
+        "heading_deg": last_gps.get("heading_deg", 0.0),
+        "speed_kn": last_gps.get("speed_kn", 0.0),
+        "depth_m": last_depth.get("depth_m"),
+        "mag_heading": state.mag_heading,
+        "gps_denied": state.gps_denied,
+    })
+
 @app.get("/api/recording/start")
 async def recording_start():
     state.recording = True; state.recorded_frames = []
@@ -588,7 +640,9 @@ async def recording_stop():
     state.recording = False
     n = len(state.recorded_frames)
     dur = _now() - state.recording_start_time
-    return {"frames": n, "duration_sec": round(dur, 1)}
+    mid = time.strftime("%Y%m%d-%H%M%S", time.localtime(state.recording_start_time))
+    state.mission_logs[mid] = {"frames": list(state.recorded_frames), "duration_sec": round(dur, 1), "source": "recording", "timestamp": state.recording_start_time}
+    return {"frames": n, "duration_sec": round(dur, 1), "mission_id": mid}
 
 
 @app.get("/api/recording/status")
@@ -602,6 +656,135 @@ async def recording_playback(start: int = 0, end: int | None = None):
     if end is None:
         end = len(state.recorded_frames)
     return state.recorded_frames[start:end]
+
+
+@app.get("/api/missions")
+async def list_missions():
+    """List all saved mission logs."""
+    result = []
+    for mid, mdata in state.mission_logs.items():
+        result.append({
+            "id": mid, "frames": len(mdata["frames"]),
+            "duration_sec": mdata["duration_sec"], "source": mdata["source"],
+        })
+    return sorted(result, key=lambda m: m["id"], reverse=True)
+
+
+@app.get("/api/missions/{mission_id}/load")
+async def load_mission(mission_id: str):
+    """Load a saved mission into the replay buffer."""
+    if mission_id not in state.mission_logs:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    state.recorded_frames = list(state.mission_logs[mission_id]["frames"])
+    return {"mission_id": mission_id, "frames": len(state.recorded_frames), "loaded": True}
+
+
+@app.post("/api/replay/start")
+async def start_replay(req: dict[str, Any] | None = None):
+    """Start replay. Body: {"mission_id": "...", "speed": 5.0} or speed query param."""
+    _cancel_replay()
+    speed = float((req or {}).get("speed", 1.0))
+    mission_id = (req or {}).get("mission_id")
+
+    if mission_id:
+        if mission_id not in state.mission_logs:
+            raise HTTPException(status_code=404, detail="Mission not found")
+        state.recorded_frames = list(state.mission_logs[mission_id]["frames"])
+        if not state.recorded_frames:
+            raise HTTPException(status_code=400, detail="Mission has no frames")
+        state._replay_active = True
+        state._replay_task = asyncio.create_task(_replay_frames(speed))
+        return {"status": "replaying", "mission_id": mission_id, "speed": speed, "total_frames": len(state.recorded_frames)}
+    elif state.recorded_frames:
+        state._replay_active = True
+        state._replay_task = asyncio.create_task(_replay_frames(speed))
+        return {"status": "replaying", "speed": speed, "total_frames": len(state.recorded_frames)}
+    else:
+        state.replay = SimrisReplay()
+        state.replay.running = True
+        async def _run():
+            await _replay_runner(state.replay, speed=speed)
+        state.replay_task = asyncio.create_task(_run())
+        return {"status": "running", "source": "simris"}
+
+
+def _cancel_replay():
+    """Cancel any active replay task."""
+    if state._replay_active:
+        state._replay_active = False
+    if state._replay_task is not None:
+        state._replay_task.cancel()
+        try:
+            pass
+        except asyncio.CancelledError:
+            pass
+        state._replay_task = None
+    if state.replay_task is not None:
+        state.replay.stop()
+        state.replay_task.cancel()
+        try:
+            pass
+        except asyncio.CancelledError:
+            pass
+        state.replay_task = None
+
+
+@app.post("/api/replay/stop")
+async def replay_stop():
+    """Stop any active replay (Simris or mission)."""
+    _cancel_replay()
+    return {"status": "stopped"}
+
+
+@app.get("/api/replay/status")
+async def replay_status_endpoint():
+    """Get replay progress."""
+    simris_status = state.replay.get_status() if state.replay is not None else {}
+    return {
+        "running": state._replay_active or simris_status.get("running", False),
+        "simris_running": simris_status.get("running", False),
+        "mission_running": state._replay_active,
+        "progress": simris_status.get("progress", 0),
+        "total_frames": len(state.recorded_frames),
+    }
+
+
+@app.get("/api/missions/{mission_id}/replay")
+async def replay_mission(mission_id: str, speed: float = 5.0):
+    """Load and start replaying a stored mission."""
+    if mission_id not in state.mission_logs:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    _cancel_replay()
+    state.recorded_frames = list(state.mission_logs[mission_id]["frames"])
+    if not state.recorded_frames:
+        raise HTTPException(status_code=400, detail="Mission has no frames")
+    state._replay_active = True
+    state._replay_task = asyncio.create_task(_replay_frames(speed))
+    return {"status": "replaying", "mission_id": mission_id, "speed": speed, "total_frames": len(state.recorded_frames)}
+
+
+async def _replay_frames(speed: float):
+    """Background task that replays recorded frames through the pipeline."""
+    frames = state.recorded_frames
+    if not frames:
+        state._replay_active = False; return
+    t0 = time.monotonic()
+    start_rel = frames[0].get("rel_time", 0)
+    for i, frame in enumerate(frames):
+        if not state._replay_active:
+            break
+        target = (frame.get("rel_time", 0) - start_rel) / speed
+        elapsed = time.monotonic() - t0
+        if target > elapsed:
+            await asyncio.sleep(target - elapsed)
+        if frame.get("lat") is not None:
+            lat, lon = frame["lat"], frame["lon"]
+            _buffer_sensor("gps", {"lat": lat, "lon": lon})
+            state.last_gps_time = _now()
+            await _broadcast({"type": "gps", "lat": lat, "lon": lon,
+                "speed_kn": frame.get("speed_kn", 0), "heading_deg": frame.get("heading_deg", 0),
+                "timestamp": _now()})
+    state._replay_active = False
 
 
 @app.get("/api/export/geojson")
@@ -629,42 +812,6 @@ async def export_csv():
     rows += [f"{e.get('timestamp', '')},support,{e['lat']},{e['lon']},{e.get('heading_deg', '')},{e.get('speed_kn', '')}," for e in state.vessel2_track]
     return Response(content="\n".join(rows), media_type="text/csv")
 
-
-# ---------------------------------------------------------------------------
-# Real-data replay API
-# ---------------------------------------------------------------------------
-
-
-
-@app.post("/api/replay/start")
-async def replay_start(speed: float = 1.0):
-    """Start replaying the Simris field dataset at the given speed multiplier."""
-    state.replay = SimrisReplay()
-    state.replay.running = True
-    async def _run():
-        await _replay_runner(state.replay, speed=speed)
-    state.replay_task = asyncio.create_task(_run())
-    return {"status": "running"}
-
-
-@app.post("/api/replay/stop")
-async def replay_stop():
-    """Stop an active replay."""
-    state.replay.stop()
-    if state.replay_task is not None:
-        state.replay_task.cancel()
-        try:
-            await state.replay_task
-        except asyncio.CancelledError:
-            pass
-        state.replay_task = None
-    return {"status": "stopped"}
-
-
-@app.get("/api/replay/status")
-async def replay_status():
-    """Return current replay status."""
-    return state.replay.get_status()
 
 # ---------------------------------------------------------------------------
 # GPS Denial & Dead Reckoning
@@ -931,22 +1078,7 @@ async def _simulator_loop() -> None:
         })
 
         # ---- Recording: save a frame every second ----
-        if state.recording and _now() - state.last_record_time >= 1.0:
-            state.last_record_time = _now()
-            frame = {
-                "timestamp": _now(),
-                "vessel1": {
-                    "lat": round(lat, 6), "lon": round(lon, 6),
-                    "heading": round(heading, 1), "speed": round(SURVEY_SPEED_MS, 2),
-                    "depth": round(depth, 2),
-                },
-                "vessel2": {
-                    "lat": round(v2_lat, 6), "lon": round(v2_lon, 6),
-                    "heading": round(v2_hdg, 1), "speed": round(V2_SPEED_MS, 2),
-                    "depth": None,
-                },
-            }
-            state.recorded_frames.append(frame)
+        _maybe_record_frame()
 
 # ---------------------------------------------------------------------------
 # Static files (mount after API routes so routes take precedence)
