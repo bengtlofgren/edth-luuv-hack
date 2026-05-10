@@ -83,6 +83,12 @@ SURVEY_SPEED_MS = 2.0          # m/s
 SURVEY_LEG_LENGTH = 200.0      # metres per long leg
 SURVEY_LEG_SPACING = 20.0      # metres between passes
 SURVEY_HEADINGS = (90.0, 0.0, 270.0, 180.0)  # east, north, west, south
+ROUTE_ERROR_SPEED_MS = SURVEY_SPEED_MS
+ROUTE_ERROR_COV_GROWTH_DIAG = 0.5
+ROUTE_ERROR_COV_GROWTH_OFFDIAG = 0.05
+ROUTE_ERROR_LANDMARK_FIX = 0.6
+ROUTE_ERROR_INIT_COV = [[0.25, 0.0], [0.0, 0.25]]
+ROUTE_ERROR_ELLIPSE_CONFIDENCE_K = math.sqrt(5.991)
 
 # Support vessel (vessel2) figure-8 holding pattern
 V2_CENTER_LAT = BASE_LAT + 0.004
@@ -278,7 +284,7 @@ class AppState:
             "max_support_distance_m": 1500.0,
         }
 
-        # Embedded metric planner route. Planner x is east, y is north, metres.
+        # Active metric route. Planner x is east, y is north, metres.
         self.planner_path_m: list[tuple[float, float]] = []
         self.planner_segment_starts_m: list[float] = []
         self.planner_total_length_m: float = 0.0
@@ -695,6 +701,77 @@ def _planner_geo_route() -> list[dict[str, float]]:
         {"x_m": x, "y_m": y, "lat": _planner_m_to_latlon(x, y)[0], "lon": _planner_m_to_latlon(x, y)[1]}
         for x, y in state.planner_path_m
     ]
+
+
+def _grow_route_error_covariance(cov: list[list[float]], duration_s: float) -> None:
+    dt = max(0.0, duration_s)
+    cov[0][0] += ROUTE_ERROR_COV_GROWTH_DIAG * dt
+    cov[1][1] += ROUTE_ERROR_COV_GROWTH_DIAG * dt
+    cov[0][1] += ROUTE_ERROR_COV_GROWTH_OFFDIAG * dt
+    cov[1][0] = cov[0][1]
+
+
+def _route_error_ellipse(cov: list[list[float]]) -> dict[str, float]:
+    a = cov[0][0]
+    b = cov[0][1]
+    d = cov[1][1]
+    trace = a + d
+    determinant = a * d - b * b
+    root = math.sqrt(max(0.0, (trace * trace) / 4.0 - determinant))
+    lambda_major = max(0.0, trace / 2.0 + root)
+    lambda_minor = max(0.0, trace / 2.0 - root)
+    if abs(b) < 1.0e-12:
+        angle_deg = 0.0 if a >= d else 90.0
+    else:
+        angle_deg = math.degrees(math.atan2(lambda_major - a, b))
+    return {
+        "semi_major_m": round(ROUTE_ERROR_ELLIPSE_CONFIDENCE_K * math.sqrt(lambda_major), 3),
+        "semi_minor_m": round(ROUTE_ERROR_ELLIPSE_CONFIDENCE_K * math.sqrt(lambda_minor), 3),
+        "angle_deg": round(angle_deg, 1),
+        "confidence": 0.95,
+    }
+
+
+def _route_error_payload(progress_m: float | None = None) -> dict[str, Any] | None:
+    if not state.planner_enabled or len(state.planner_path_m) < 2:
+        return None
+
+    route_progress_m = state.planner_progress_m if progress_m is None else progress_m
+    route_progress_m = max(0.0, min(route_progress_m, state.planner_total_length_m))
+    speed_m_s = max(ROUTE_ERROR_SPEED_MS, 1.0e-9)
+    cov = [row[:] for row in ROUTE_ERROR_INIT_COV]
+    last_progress_m = 0.0
+
+    for landmark_progress_m in state.planner_segment_starts_m[1:-1]:
+        if route_progress_m < landmark_progress_m:
+            break
+        _grow_route_error_covariance(cov, (landmark_progress_m - last_progress_m) / speed_m_s)
+        cov[0][0] *= ROUTE_ERROR_LANDMARK_FIX
+        cov[1][1] *= ROUTE_ERROR_LANDMARK_FIX
+        cov[0][1] *= ROUTE_ERROR_LANDMARK_FIX
+        cov[1][0] = cov[0][1]
+        last_progress_m = landmark_progress_m
+
+    _grow_route_error_covariance(cov, (route_progress_m - last_progress_m) / speed_m_s)
+    x_m, y_m, heading = _planner_xy_at_progress(route_progress_m)
+    sigma_x = math.sqrt(max(cov[0][0], 0.0))
+    sigma_y = math.sqrt(max(cov[1][1], 0.0))
+    rho = cov[0][1] / (sigma_x * sigma_y) if sigma_x > 0.0 and sigma_y > 0.0 else 0.0
+    rho = max(-1.0, min(1.0, rho))
+
+    return {
+        "t_s": round(route_progress_m / speed_m_s, 2),
+        "mean_m": [round(x_m, 3), round(y_m, 3)],
+        "heading_deg": round(heading, 1),
+        "cov": [
+            [round(cov[0][0], 5), round(cov[0][1], 5)],
+            [round(cov[1][0], 5), round(cov[1][1], 5)],
+        ],
+        "sigma_x_m": round(sigma_x, 3),
+        "sigma_y_m": round(sigma_y, 3),
+        "rho_xy": round(rho, 3),
+        "ellipse": _route_error_ellipse(cov),
+    }
 
 
 def _recalc_drift() -> None:
@@ -1787,7 +1864,7 @@ async def delete_waypoint(wp_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Embedded planner control API
+# Main route control API
 # ---------------------------------------------------------------------------
 
 @app.post("/api/planner/path")
@@ -1812,10 +1889,14 @@ async def set_planner_path(path: PlannerPathIn):
     _set_planner_path(points)
     if validation["warnings"]:
         _log_event("planner", "Planner route has safety warnings", "warning", validation)
+    x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
+    lat, lon = _planner_m_to_latlon(x_m, y_m)
     return {
         "status": "planner_route_active",
         "waypoints": _planner_geo_route(),
         "total_length_m": round(state.planner_total_length_m, 2),
+        "position": {"x_m": x_m, "y_m": y_m, "lat": lat, "lon": lon, "heading_deg": round(heading, 1)},
+        "route_error": _route_error_payload(),
         "validation": validation,
     }
 
@@ -1848,6 +1929,8 @@ async def plan_route_to_destination(route: RoutePlanIn):
             "min_depth_m": validation.get("min_depth_m"),
         },
     )
+    x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
+    lat, lon = _planner_m_to_latlon(x_m, y_m)
     return {
         "status": "route_active",
         "enabled": state.planner_enabled,
@@ -1866,6 +1949,8 @@ async def plan_route_to_destination(route: RoutePlanIn):
         },
         "waypoints": _planner_geo_route(),
         "total_length_m": round(state.planner_total_length_m, 2),
+        "position": {"x_m": x_m, "y_m": y_m, "lat": lat, "lon": lon, "heading_deg": round(heading, 1)},
+        "route_error": _route_error_payload(),
         "direct_length_m": round(validation["direct_length_m"], 2),
         "min_depth_m": validation.get("min_depth_m"),
         "sample_count": validation["samples_checked"],
@@ -1907,6 +1992,7 @@ async def planner_status():
         "total_length_m": round(state.planner_total_length_m, 2),
         "position": {"x_m": x_m, "y_m": y_m, "lat": lat, "lon": lon, "heading_deg": round(heading, 1)},
         "waypoints": _planner_geo_route(),
+        "route_error": _route_error_payload(),
         "min_depth_m": validation.get("min_depth_m") if validation else None,
         "sample_count": validation.get("samples_checked", 0) if validation else 0,
         "blocked_samples": validation.get("blocked_samples", 0) if validation else 0,

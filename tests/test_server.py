@@ -516,6 +516,10 @@ class TestRoutePlanner:
             assert data["status"] == "planner_route_active"
             assert data["total_length_m"] == 20.0
             assert len(data["waypoints"]) == 3
+            assert data["route_error"]["t_s"] == 0.0
+            assert data["route_error"]["mean_m"] == [0.0, 0.0]
+            assert data["route_error"]["sigma_x_m"] == pytest.approx(0.5)
+            assert data["route_error"]["sigma_y_m"] == pytest.approx(0.5)
             assert data["waypoints"][0]["lat"] == pytest.approx(src.server.BASE_LAT)
             assert data["waypoints"][0]["lon"] == pytest.approx(src.server.BASE_LON)
             assert data["waypoints"][1]["lat"] == pytest.approx(src.server.BASE_LAT)
@@ -531,6 +535,7 @@ class TestRoutePlanner:
             assert resp.status_code == 200
             assert resp.json()["enabled"] is True
             assert resp.json()["paused"] is False
+            assert resp.json()["route_error"]["cov"] == [[0.25, 0.0], [0.0, 0.25]]
 
             resp = await ac.post("/api/planner/pause")
             assert resp.status_code == 200
@@ -573,10 +578,14 @@ class TestRoutePlanner:
             assert data["total_length_m"] > 0
             assert data["min_depth_m"] >= src.server.ROUTE_MIN_DEPTH_M
             assert len(data["waypoints"]) >= 2
+            assert data["route_error"]["sigma_x_m"] == pytest.approx(0.5)
+            assert data["route_error"]["sigma_y_m"] == pytest.approx(0.5)
+            assert "ellipse" in data["route_error"]
 
             status = (await ac.get("/api/planner/status")).json()
             assert status["enabled"] is True
             assert status["total_length_m"] == pytest.approx(data["total_length_m"])
+            assert status["route_error"]["rho_xy"] == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_click_route_rejects_land_destination(self, monkeypatch):
@@ -638,6 +647,31 @@ class TestRoutePlanner:
         assert x_m == pytest.approx(10.0)
         assert y_m == pytest.approx(10.0)
         assert heading == pytest.approx(0.0)
+
+    def test_route_error_payload_tracks_planner_progress(self, monkeypatch):
+        _fresh_app(monkeypatch)
+        src.server._set_planner_path([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)])
+
+        initial = src.server._route_error_payload()
+        assert initial["t_s"] == 0.0
+        assert initial["mean_m"] == [0.0, 0.0]
+        assert initial["cov"] == [[0.25, 0.0], [0.0, 0.25]]
+
+        src.server._advance_planner_route(10.0)
+        at_landmark = src.server._route_error_payload()
+        assert at_landmark["t_s"] == pytest.approx(5.0)
+        assert at_landmark["mean_m"] == [10.0, 0.0]
+        assert at_landmark["sigma_x_m"] == pytest.approx(math.sqrt(1.65), rel=1e-3)
+        assert at_landmark["sigma_y_m"] == pytest.approx(math.sqrt(1.65), rel=1e-3)
+        assert at_landmark["rho_xy"] == pytest.approx(0.091, abs=0.001)
+        assert at_landmark["ellipse"]["semi_major_m"] > at_landmark["sigma_x_m"]
+
+        src.server._advance_planner_route(5.0)
+        later = src.server._route_error_payload()
+        assert src.server.state.planner_progress_m == pytest.approx(15.0)
+        assert later["mean_m"] == [10.0, 5.0]
+        assert later["sigma_x_m"] > at_landmark["sigma_x_m"]
+        assert later["sigma_y_m"] > at_landmark["sigma_y_m"]
 
 
 # ===================================================================

@@ -91,6 +91,9 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .planner-progress-track{height:5px;background:#1a3050;border-radius:3px;overflow:hidden;margin:6px 0}
 #planner-progress-fill{height:100%;width:0;background:#7fb3d5;transition:width .2s ease}
 #planner-distance{font-size:10px;color:#7a8aa0;font-family:monospace}
+.planner-error-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px 8px;margin-top:7px;font-family:monospace;font-size:9px;color:#7a8aa0}
+.planner-error-grid span{display:block;text-transform:uppercase;letter-spacing:.4px}
+.planner-error-grid b{display:block;color:#d0d8e8;font-size:10px;font-weight:500;margin-top:1px;white-space:nowrap}
 .planner-route-dot{width:14px;height:14px;border-radius:50%;background:#7fb3d5;border:2px solid #08111f;box-shadow:0 0 8px rgba(127,179,213,.8)}
 #gpsdeny-btn.denied{background:rgba(212,64,64,0.2)!important;border-color:#d44040!important;color:#d44040!important;animation:pulse 1.5s infinite}
 #gpsdeny-btn.gps-active{background:rgba(0,212,100,0.15);border-color:#00d46a;color:#00d46a}
@@ -212,6 +215,17 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     </div>
     <div class="planner-progress-track"><div id="planner-progress-fill"></div></div>
     <div id="planner-distance">No active route</div>
+    <div class="planner-error-grid">
+      <div><span>t</span><b id="planner-error-t">--</b></div>
+      <div><span>x</span><b id="planner-error-x">--</b></div>
+      <div><span>y</span><b id="planner-error-y">--</b></div>
+      <div><span>sigma x</span><b id="planner-error-sx">--</b></div>
+      <div><span>sigma y</span><b id="planner-error-sy">--</b></div>
+      <div><span>rho xy</span><b id="planner-error-rho">--</b></div>
+      <div><span>cov xx</span><b id="planner-error-cxx">--</b></div>
+      <div><span>cov xy</span><b id="planner-error-cxy">--</b></div>
+      <div><span>cov yy</span><b id="planner-error-cyy">--</b></div>
+    </div>
     <div class="planner-actions">
       <button class="export-btn" onclick="window.focusPlannerRoute()">Focus</button>
       <button class="export-btn" onclick="window.clearPlannerRoute()">Clear</button>
@@ -288,7 +302,7 @@ var recording=false,recStartTime=null,recTimer=null,showingReplay=false,replayPo
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
 var gpsDenied=false,magCorrection=true,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
-var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false,routePlanning=false;
+var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerErrorEllipse=null,plannerRouteKey='',plannerAutoFit=false,routePlanning=false;
 var showTracks=true,showUncertainty=true,showSupport=true,healthTimer=null,eventTimer=null;
 var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
@@ -585,11 +599,15 @@ function updateDataSource(){var el=document.getElementById('data-source');var si
 function triggerDownload(url,name){fetch(url).then(function(r){return r.blob();}).then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}).catch(function(){});}
 function exportGeoJSON(){triggerDownload('/api/export/geojson','mission_tracks.geojson');}
 function exportCSV(){triggerDownload('/api/export/csv','mission_data.csv');}
-function clearPlannerLayers(){if(plannerRouteLine&&map){map.removeLayer(plannerRouteLine);}plannerRouteLine=null;plannerRouteMarkers.forEach(function(m){if(map)map.removeLayer(m);});plannerRouteMarkers=[];plannerRouteKey='';plannerAutoFit=false;}
+function setText(id,value){var el=document.getElementById(id);if(el)el.textContent=value;}
+function fmtMetric(value,digits,suffix){if(value==null||isNaN(Number(value)))return'--';return Number(value).toFixed(digits)+(suffix||'');}
+function updatePlannerErrorReadout(err){var cov=err&&Array.isArray(err.cov)?err.cov:null;setText('planner-error-t',err?fmtMetric(err.t_s,2,' s'):'--');setText('planner-error-x',err&&Array.isArray(err.mean_m)?fmtMetric(err.mean_m[0],2,' m'):'--');setText('planner-error-y',err&&Array.isArray(err.mean_m)?fmtMetric(err.mean_m[1],2,' m'):'--');setText('planner-error-sx',err?fmtMetric(err.sigma_x_m,2,' m'):'--');setText('planner-error-sy',err?fmtMetric(err.sigma_y_m,2,' m'):'--');setText('planner-error-rho',err?fmtMetric(err.rho_xy,3,''):'--');setText('planner-error-cxx',cov?fmtMetric(cov[0][0],3,''):'--');setText('planner-error-cxy',cov?fmtMetric(cov[0][1],3,''):'--');setText('planner-error-cyy',cov?fmtMetric(cov[1][1],3,''):'--');}
+function clearPlannerLayers(){if(plannerRouteLine&&map){map.removeLayer(plannerRouteLine);}plannerRouteLine=null;if(plannerErrorEllipse&&map){map.removeLayer(plannerErrorEllipse);}plannerErrorEllipse=null;plannerRouteMarkers.forEach(function(m){if(map)map.removeLayer(m);});plannerRouteMarkers=[];plannerRouteKey='';plannerAutoFit=false;}
 function setPlannerPill(label,cls){var el=document.getElementById('planner-state-pill');if(!el)return;el.textContent=label;el.className='planner-pill'+(cls?' '+cls:'');}
 function updatePlannerRouteLayer(d){if(!map)return;var wps=d&&Array.isArray(d.waypoints)?d.waypoints:[];if(!d.enabled||wps.length<2){clearPlannerLayers();return;}var coords=wps.map(function(w){return[w.lat,w.lon];});var key=coords.map(function(c){return c[0].toFixed(6)+','+c[1].toFixed(6);}).join('|');if(key!==plannerRouteKey){clearPlannerLayers();plannerRouteKey=key;plannerRouteLine=L.polyline(coords,{color:'#7fb3d5',weight:4,opacity:.95,dashArray:'10,8',lineCap:'round'}).addTo(map);plannerRouteLine.bindTooltip('Active route',{sticky:true});plannerRouteMarkers=coords.map(function(c,i){return L.circleMarker(c,{radius:i===0||i===coords.length-1?5:4,color:'#08111f',weight:2,fillColor:'#7fb3d5',fillOpacity:1,zIndexOffset:650}).addTo(map);});if(!plannerAutoFit&&plannerRouteLine.getBounds().isValid()){map.fitBounds(plannerRouteLine.getBounds(),{padding:[40,40],maxZoom:16});plannerAutoFit=true;}}}
-function updatePlannerPanel(d){var enabled=!!(d&&d.enabled);var paused=!!(d&&d.paused);var done=!!(d&&d.done);var progress=d&&d.progress_m!=null?d.progress_m:0;var total=d&&d.total_length_m!=null?d.total_length_m:0;var pct=total>0?Math.min(100,Math.max(0,(progress/total)*100)):0;var fill=document.getElementById('planner-progress-fill');var label=document.getElementById('planner-progress-label');var dist=document.getElementById('planner-distance');var banner=document.getElementById('planner-banner');var minDepth=d&&d.min_depth_m!=null?d.min_depth_m:null;if(fill)fill.style.width=pct.toFixed(1)+'%';if(label)label.textContent=total>0?progress.toFixed(1)+' / '+total.toFixed(1)+' m':'-- / -- m';if(dist){var count=d&&Array.isArray(d.waypoints)?d.waypoints.length:0;var depthLabel=minDepth!=null?' | min depth '+Number(minDepth).toFixed(1)+' m':'';dist.textContent=enabled?count+' pts | '+pct.toFixed(0)+'% complete'+depthLabel:'No active route';}if(banner){if(enabled){banner.className='visible';banner.textContent=(paused?'Route Paused':done?'Route Done':'Route')+' '+progress.toFixed(0)+'/'+total.toFixed(0)+' m';}else{banner.className='';banner.textContent='Route';}}if(!enabled)setPlannerPill('Idle','');else if(paused)setPlannerPill('Paused','paused');else if(done)setPlannerPill('Done','done');else setPlannerPill('Active','active');}
-function updatePlannerStatus(d){updatePlannerPanel(d);updatePlannerRouteLayer(d);}
+function updatePlannerErrorLayer(d){if(!map)return;if(plannerErrorEllipse){map.removeLayer(plannerErrorEllipse);plannerErrorEllipse=null;}var err=d&&d.route_error?d.route_error:null;var pos=d&&d.position?d.position:null;var ell=err&&err.ellipse?err.ellipse:null;if(!d||!d.enabled||!pos||!ell)return;var pts=ellipsePolygon(pos.lat,pos.lon,ell.semi_major_m,ell.semi_minor_m,ell.angle_deg,64);plannerErrorEllipse=L.polygon(pts,{color:'#7fb3d5',weight:2,opacity:.85,fillColor:'#7fb3d5',fillOpacity:.12,dashArray:'4,5',interactive:false}).addTo(map);}
+function updatePlannerPanel(d){var enabled=!!(d&&d.enabled);var paused=!!(d&&d.paused);var done=!!(d&&d.done);var progress=d&&d.progress_m!=null?d.progress_m:0;var total=d&&d.total_length_m!=null?d.total_length_m:0;var pct=total>0?Math.min(100,Math.max(0,(progress/total)*100)):0;var err=enabled&&d&&d.route_error?d.route_error:null;var fill=document.getElementById('planner-progress-fill');var label=document.getElementById('planner-progress-label');var dist=document.getElementById('planner-distance');var banner=document.getElementById('planner-banner');var minDepth=d&&d.min_depth_m!=null?d.min_depth_m:null;updatePlannerErrorReadout(err);if(fill)fill.style.width=pct.toFixed(1)+'%';if(label)label.textContent=total>0?progress.toFixed(1)+' / '+total.toFixed(1)+' m':'-- / -- m';if(dist){var count=d&&Array.isArray(d.waypoints)?d.waypoints.length:0;var depthLabel=minDepth!=null?' | min depth '+Number(minDepth).toFixed(1)+' m':'';var errLabel=err?' | err '+Number(err.sigma_x_m).toFixed(1)+'/'+Number(err.sigma_y_m).toFixed(1)+' m':'';dist.textContent=enabled?count+' pts | '+pct.toFixed(0)+'% complete'+depthLabel+errLabel:'No active route';}if(banner){if(enabled){banner.className='visible';banner.textContent=(paused?'Route Paused':done?'Route Done':'Route')+' '+progress.toFixed(0)+'/'+total.toFixed(0)+' m'+(err?' | err '+Number(err.sigma_x_m).toFixed(1)+'/'+Number(err.sigma_y_m).toFixed(1)+' m':'');}else{banner.className='';banner.textContent='Route';}}if(!enabled)setPlannerPill('Idle','');else if(paused)setPlannerPill('Paused','paused');else if(done)setPlannerPill('Done','done');else setPlannerPill('Active','active');}
+function updatePlannerStatus(d){updatePlannerPanel(d);updatePlannerRouteLayer(d);updatePlannerErrorLayer(d);}
 function fetchPlannerStatus(){return fetch('/api/planner/status').then(function(r){return r.json();}).then(updatePlannerStatus).catch(function(){});}
 function clearPlannerRoute(){fetch('/api/planner/clear',{method:'POST'}).then(function(r){return r.json();}).then(updatePlannerStatus).catch(function(){});}
 function focusPlannerRoute(){if(plannerRouteLine&&plannerRouteLine.getBounds().isValid()){map.fitBounds(plannerRouteLine.getBounds(),{padding:[40,40],maxZoom:16});}else if(vesselMarker){map.panTo(vesselMarker.getLatLng(),{animate:true,duration:.3});}}
