@@ -6,6 +6,7 @@ interface Props {
   connected: boolean;
   status: SimStatus;
   waypointCount: number;
+  plannerSync: "idle" | "syncing" | "linked" | "paused" | "error";
   confidence: ConfidenceLevel;
   onConfidenceChange: (c: ConfidenceLevel) => void;
   onPlay: () => void;
@@ -22,6 +23,7 @@ export function ControlPanel({
   connected,
   status,
   waypointCount,
+  plannerSync,
   confidence,
   onConfidenceChange,
   onPlay,
@@ -36,7 +38,7 @@ export function ControlPanel({
   const canPlay =
     connected &&
     waypointCount >= 2 &&
-    (status === "idle" || status === "paused");
+    (status === "idle" || status === "paused" || status === "done");
   const canPause = connected && status === "running";
 
   return (
@@ -53,12 +55,27 @@ export function ControlPanel({
       </section>
 
       <section>
+        <h2>Command Center</h2>
+        <div className={`sync-pill ${plannerSync}`}>
+          {plannerSync === "idle"
+            ? "route idle"
+            : plannerSync === "syncing"
+              ? "syncing route"
+              : plannerSync === "linked"
+                ? "route linked"
+                : plannerSync === "paused"
+                  ? "route paused"
+                  : "sync failed"}
+        </div>
+      </section>
+
+      <section>
         <h2>Path</h2>
         <div style={{ fontSize: 13 }}>
-          {waypointCount === 0
-            ? "Click on the canvas to add waypoints."
-            : `${waypointCount} waypoint${waypointCount === 1 ? "" : "s"}${
-                status === "idle" ? " (click to add more)" : ""
+            {waypointCount === 0
+              ? "Click on the canvas to add waypoints."
+              : `${waypointCount} waypoint${waypointCount === 1 ? "" : "s"}${
+                status === "idle" || status === "done" ? " (click to add more)" : ""
               }`}
         </div>
       </section>

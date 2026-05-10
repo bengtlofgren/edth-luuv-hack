@@ -19,12 +19,15 @@ body,
 
 .app {
   display: flex;
-  height: 100vh;
-  width: 100vw;
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .canvas-pane {
-  flex: 1 1 70%;
+  flex: 1 1 auto;
+  min-width: 0;
   background: #0a1320;
   position: relative;
 }
@@ -37,6 +40,7 @@ body,
   flex-direction: column;
   gap: 16px;
   overflow-y: auto;
+  background: #0b1421;
 }
 
 .panel h2 {
@@ -101,6 +105,38 @@ body,
 
 .status-dot.disconnected {
   background: #e53935;
+}
+
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid #2a3d57;
+  border-radius: 4px;
+  color: #9fb6cf;
+  background: #101d2f;
+  font-size: 12px;
+}
+
+.sync-pill.linked {
+  color: #4caf50;
+  border-color: rgba(76, 175, 80, 0.45);
+  background: rgba(76, 175, 80, 0.1);
+}
+
+.sync-pill.syncing,
+.sync-pill.paused {
+  color: #ffb300;
+  border-color: rgba(255, 179, 0, 0.45);
+  background: rgba(255, 179, 0, 0.1);
+}
+
+.sync-pill.error {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.45);
+  background: rgba(255, 107, 107, 0.1);
 }
 
 .bar {

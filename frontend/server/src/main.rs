@@ -11,7 +11,7 @@ use tokio::time::interval;
 
 const TICK_HZ: f64 = 20.0;
 const TICK_DT: f64 = 1.0 / TICK_HZ;
-const SPEED: f64 = 5.0;
+const SPEED: f64 = 2.0;
 const COV_GROWTH_DIAG: f64 = 0.5;
 const COV_GROWTH_OFFDIAG: f64 = 0.05;
 const LANDMARK_FIX: f64 = 0.6;
@@ -104,6 +104,10 @@ impl Sim {
         self.state = SimState::Idle;
     }
 
+    fn has_runnable_path(&self) -> bool {
+        self.path.len() >= 2 && self.total_length > f64::EPSILON
+    }
+
     fn current_mean(&self) -> [f64; 2] {
         if self.path.is_empty() {
             return [0.0, 0.0];
@@ -129,7 +133,7 @@ impl Sim {
         if self.state != SimState::Running {
             return None;
         }
-        if self.path.len() < 2 {
+        if !self.has_runnable_path() {
             self.state = SimState::Done;
             return None;
         }
@@ -197,7 +201,7 @@ async fn handle_socket(socket: WebSocket) {
                                     sim.path.len(),
                                     sim.state
                                 );
-                                if sim.path.len() >= 2 && sim.state != SimState::Done {
+                                if sim.has_runnable_path() && sim.state != SimState::Done {
                                     sim.state = SimState::Running;
                                 }
                             }
@@ -260,4 +264,73 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     println!("underwater-mission-planner-server listening on ws://{addr}/ws");
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn set_path_computes_metric_segment_lengths() {
+        let mut sim = Sim::new();
+        sim.set_path(vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]);
+
+        assert_close(sim.total_length, 20.0);
+        assert_eq!(sim.seg_starts.len(), 3);
+        assert_close(sim.seg_starts[0], 0.0);
+        assert_close(sim.seg_starts[1], 10.0);
+        assert_close(sim.seg_starts[2], 20.0);
+        assert!(sim.has_runnable_path());
+    }
+
+    #[test]
+    fn tick_moves_by_speed_times_tick_dt() {
+        let mut sim = Sim::new();
+        sim.set_path(vec![[0.0, 0.0], [10.0, 0.0]]);
+        sim.state = SimState::Running;
+
+        let (mean, _) = sim.tick().expect("running path should emit a tick");
+
+        assert_close(sim.s, SPEED * TICK_DT);
+        assert_close(mean[0], SPEED * TICK_DT);
+        assert_close(mean[1], 0.0);
+    }
+
+    #[test]
+    fn tick_follows_segments_and_clamps_to_final_waypoint() {
+        let mut sim = Sim::new();
+        sim.set_path(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+        sim.state = SimState::Running;
+        sim.s = 0.95;
+
+        let (mean, _) = sim.tick().expect("running path should emit a tick");
+        assert_eq!(sim.current_segment, 1);
+        assert_close(mean[0], 1.0);
+        assert_close(mean[1], 0.05);
+
+        sim.s = 1.95;
+        let (mean, _) = sim.tick().expect("running path should emit final tick");
+        assert_eq!(sim.state, SimState::Done);
+        assert_close(sim.s, 2.0);
+        assert_close(mean[0], 1.0);
+        assert_close(mean[1], 1.0);
+    }
+
+    #[test]
+    fn zero_length_path_is_not_runnable() {
+        let mut sim = Sim::new();
+        sim.set_path(vec![[1.0, 1.0], [1.0, 1.0]]);
+        sim.state = SimState::Running;
+
+        assert!(!sim.has_runnable_path());
+        assert!(sim.tick().is_none());
+        assert_eq!(sim.state, SimState::Done);
+    }
 }
