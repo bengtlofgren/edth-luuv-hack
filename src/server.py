@@ -49,7 +49,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import numpy as np
 from pydantic import BaseModel, Field
@@ -61,13 +60,6 @@ import uvicorn
 
 BUFFER_SIZE = 300
 SIMULATOR_RATE = 0.05  # seconds per tick (20 Hz)
-PLANNER_TICK_DT = 0.05
-PLANNER_SPEED_MS = 2.0
-PLANNER_COV_GROWTH_DIAG = 0.5
-PLANNER_COV_GROWTH_OFFDIAG = 0.05
-PLANNER_LANDMARK_FIX = 0.6
-PLANNER_INIT_COV = [[0.25, 0.0], [0.0, 0.25]]
-
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 SIMULATOR_DISABLED = os.environ.get(
@@ -75,14 +67,14 @@ SIMULATOR_DISABLED = os.environ.get(
 ).lower() in {"1", "true", "yes", "on"}
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-PLANNER_DIST_DIR = _PROJECT_ROOT / "frontend" / "web" / "dist"
-PLANNER_INDEX = PLANNER_DIST_DIR / "index.html"
 RUNTIME_DIR = Path(os.environ.get("EDTH_RUNTIME_DIR", _PROJECT_ROOT / "runtime"))
 CONFIG_PATH = Path(os.environ.get("EDTH_CONFIG_PATH", RUNTIME_DIR / "command_center_config.json"))
 RECORDINGS_DIR = Path(os.environ.get("EDTH_RECORDINGS_DIR", RUNTIME_DIR / "recordings"))
 
 SENSOR_NAMES = {"accelerometer", "magnetometer", "gyroscope", "orientation", "barometer"}
 APP_MODES = {"simulator", "replay", "live", "training"}
+ROUTE_MIN_DEPTH_M = 2.0
+ROUTE_SAMPLE_SPACING_M = 35.0
 
 # Real data location — Simrishamn field test
 BASE_LAT = 55.5601
@@ -184,6 +176,13 @@ class RiskSegment(BaseModel):
 
 class PlannerPathIn(BaseModel):
     waypoints: list[list[float]] = Field(..., min_length=2)
+
+
+class RoutePlanIn(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+    start_lat: float | None = Field(None, ge=-90, le=90)
+    start_lon: float | None = Field(None, ge=-180, le=180)
 
 # ---------------------------------------------------------------------------
 # Application state
@@ -510,10 +509,119 @@ def _nav_m_to_latlon(position_m: Any) -> tuple[float, float] | None:
 
 
 def _planner_m_to_latlon(x_m: float, y_m: float) -> tuple[float, float]:
-    """Convert planner metres into local geographic coordinates near Simrishamn."""
+    """Convert local route metres into geographic coordinates near Simrishamn."""
     lat = BASE_LAT + y_m / 111320.0
     lon = BASE_LON + x_m / (111320.0 * math.cos(math.radians(BASE_LAT)))
     return lat, lon
+
+
+def _latlon_to_planner_m(lat: float, lon: float) -> tuple[float, float]:
+    """Convert geographic coordinates into local route metres near Simrishamn."""
+    x_m = (lon - BASE_LON) * (111320.0 * math.cos(math.radians(BASE_LAT)))
+    y_m = (lat - BASE_LAT) * 111320.0
+    return x_m, y_m
+
+
+def _route_length_m(points: list[tuple[float, float]]) -> float:
+    return sum(
+        math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+        for i in range(len(points) - 1)
+    )
+
+
+def _route_candidates(
+    start: tuple[float, float],
+    destination: tuple[float, float],
+) -> list[list[tuple[float, float]]]:
+    sx, sy = start
+    dx, dy = destination
+    route_dx = dx - sx
+    route_dy = dy - sy
+    direct_len = math.hypot(route_dx, route_dy)
+    candidates = [[start, destination]]
+    if direct_len < 20.0:
+        return candidates
+
+    perp_x = -route_dy / direct_len
+    perp_y = route_dx / direct_len
+    mid_x = (sx + dx) / 2.0
+    mid_y = (sy + dy) / 2.0
+    max_offset = min(1200.0, max(80.0, direct_len * 0.65))
+    offsets = [50.0, 100.0, 200.0, 350.0, 600.0, max_offset]
+    unique_offsets: list[float] = []
+    for offset in offsets:
+        offset = min(offset, max_offset)
+        if offset not in unique_offsets:
+            unique_offsets.append(offset)
+
+    for offset in unique_offsets:
+        for sign in (-1.0, 1.0):
+            dogleg = (mid_x + perp_x * offset * sign, mid_y + perp_y * offset * sign)
+            candidates.append([start, dogleg, destination])
+
+    return candidates
+
+
+def _latest_route_start() -> tuple[float, float]:
+    last_gps = _latest_gps()
+    if last_gps and last_gps.get("lat") is not None and last_gps.get("lon") is not None:
+        return float(last_gps["lat"]), float(last_gps["lon"])
+    return BASE_LAT, BASE_LON
+
+
+def _route_is_safe(validation: dict[str, Any]) -> bool:
+    unsafe_codes = {"shallow_depth", "missing_depth"}
+    warnings = validation.get("warnings", [])
+    return bool(validation.get("ok")) and not any(w.get("code") in unsafe_codes for w in warnings)
+
+
+def _route_score(points: list[tuple[float, float]], validation: dict[str, Any]) -> float:
+    min_depth = validation.get("min_depth_m")
+    min_depth = float(min_depth) if min_depth is not None else 0.0
+    unsafe_penalty = 0.0 if _route_is_safe(validation) else 10000.0
+    depth_margin_penalty = max(0.0, 8.0 - min_depth) * 30.0
+    turn_penalty = max(0, len(points) - 2) * 20.0
+    return _route_length_m(points) + unsafe_penalty + depth_margin_penalty + turn_penalty
+
+
+def _select_best_route(
+    start_lat: float,
+    start_lon: float,
+    destination_lat: float,
+    destination_lon: float,
+) -> tuple[list[tuple[float, float]], dict[str, Any]]:
+    min_depth = state.safety_config.get("min_depth_m", ROUTE_MIN_DEPTH_M)
+    start_depth = get_depth(start_lat, start_lon)
+    dest_depth = get_depth(destination_lat, destination_lon)
+    if start_depth is None or start_depth < min_depth:
+        raise HTTPException(status_code=400, detail="Current vessel position is outside routable water")
+    if dest_depth is None or dest_depth < min_depth:
+        raise HTTPException(status_code=400, detail="Destination is on land, too shallow, or outside chart area")
+
+    start = _latlon_to_planner_m(start_lat, start_lon)
+    destination = _latlon_to_planner_m(destination_lat, destination_lon)
+    direct_length = math.hypot(destination[0] - start[0], destination[1] - start[1])
+    if direct_length <= 1.0:
+        raise HTTPException(status_code=400, detail="Destination is too close to the vessel")
+
+    scored: list[tuple[float, list[tuple[float, float]], dict[str, Any]]] = []
+    for candidate in _route_candidates(start, destination):
+        validation = _validate_planner_points(candidate)
+        scored.append((_route_score(candidate, validation), candidate, validation))
+
+    safe = [item for item in scored if _route_is_safe(item[2])]
+    if not safe:
+        raise HTTPException(status_code=400, detail="No safe route found through charted water")
+
+    best_score, best_points, best_validation = min(safe, key=lambda item: item[0])
+    best_validation = {
+        **best_validation,
+        "score": best_score,
+        "direct_length_m": direct_length,
+        "start_depth_m": start_depth,
+        "destination_depth_m": dest_depth,
+    }
+    return best_points, best_validation
 
 
 def _set_planner_path(points: list[tuple[float, float]]) -> None:
@@ -587,42 +695,6 @@ def _planner_geo_route() -> list[dict[str, float]]:
         {"x_m": x, "y_m": y, "lat": _planner_m_to_latlon(x, y)[0], "lon": _planner_m_to_latlon(x, y)[1]}
         for x, y in state.planner_path_m
     ]
-
-
-def _metric_path(points: list[tuple[float, float]]) -> tuple[list[float], float]:
-    starts: list[float] = []
-    acc = 0.0
-    for i, point in enumerate(points):
-        starts.append(acc)
-        if i + 1 < len(points):
-            nxt = points[i + 1]
-            acc += math.hypot(nxt[0] - point[0], nxt[1] - point[1])
-    return starts, acc
-
-
-def _xy_on_metric_path(
-    points: list[tuple[float, float]],
-    starts: list[float],
-    total_length_m: float,
-    progress_m: float,
-) -> tuple[float, float]:
-    if not points:
-        return 0.0, 0.0
-    if len(points) == 1 or total_length_m <= 0.0:
-        return points[0]
-
-    progress_m = max(0.0, min(progress_m, total_length_m))
-    segment = len(points) - 2
-    for i in range(len(points) - 1):
-        if progress_m <= starts[i + 1] or i == len(points) - 2:
-            segment = i
-            break
-
-    p0, p1 = points[segment], points[segment + 1]
-    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
-    seg_len = max(math.hypot(dx, dy), 1e-9)
-    alpha = max(0.0, min(1.0, (progress_m - starts[segment]) / seg_len))
-    return p0[0] + alpha * dx, p0[1] + alpha * dy
 
 
 def _recalc_drift() -> None:
@@ -1392,7 +1464,7 @@ def _validate_planner_points(points: list[tuple[float, float]]) -> dict[str, Any
     for i in range(len(points) - 1):
         p0, p1 = points[i], points[i + 1]
         seg_len = max(1.0, math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
-        sample_count = max(2, min(20, int(seg_len // 25) + 2))
+        sample_count = max(2, min(20, int(seg_len // ROUTE_SAMPLE_SPACING_M) + 2))
         for j in range(sample_count):
             alpha = j / max(1, sample_count - 1)
             x = p0[0] + (p1[0] - p0[0]) * alpha
@@ -1435,6 +1507,7 @@ def _validate_planner_points(points: list[tuple[float, float]]) -> dict[str, Any
         "warnings": warnings,
         "total_length_m": round(total_length, 2),
         "samples_checked": samples_checked,
+        "blocked_samples": shallow_samples + missing_depth_samples,
         "min_depth_m": None if min_depth == float("inf") else round(min_depth, 1),
     }
 
@@ -1757,6 +1830,50 @@ async def validate_planner_path(path: PlannerPathIn):
     return _validate_planner_points(points)
 
 
+@app.post("/api/route/plan")
+async def plan_route_to_destination(route: RoutePlanIn):
+    start_lat, start_lon = (
+        (route.start_lat, route.start_lon)
+        if route.start_lat is not None and route.start_lon is not None
+        else _latest_route_start()
+    )
+    points, validation = _select_best_route(start_lat, start_lon, route.lat, route.lon)
+    _set_planner_path(points)
+    await _emit_event(
+        "planner",
+        "Route planned from command center map",
+        data={
+            "total_length_m": round(state.planner_total_length_m, 2),
+            "waypoint_count": len(points),
+            "min_depth_m": validation.get("min_depth_m"),
+        },
+    )
+    return {
+        "status": "route_active",
+        "enabled": state.planner_enabled,
+        "paused": state.planner_paused,
+        "done": state.planner_done,
+        "progress_m": round(state.planner_progress_m, 2),
+        "start": {
+            "lat": start_lat,
+            "lon": start_lon,
+            "depth_m": round(validation["start_depth_m"], 1),
+        },
+        "destination": {
+            "lat": route.lat,
+            "lon": route.lon,
+            "depth_m": round(validation["destination_depth_m"], 1),
+        },
+        "waypoints": _planner_geo_route(),
+        "total_length_m": round(state.planner_total_length_m, 2),
+        "direct_length_m": round(validation["direct_length_m"], 2),
+        "min_depth_m": validation.get("min_depth_m"),
+        "sample_count": validation["samples_checked"],
+        "blocked_samples": validation["blocked_samples"],
+        "validation": validation,
+    }
+
+
 @app.post("/api/planner/pause")
 async def pause_planner_path():
     if state.planner_enabled and not state.planner_done:
@@ -1781,6 +1898,7 @@ async def clear_planner_route():
 async def planner_status():
     x_m, y_m, heading = _planner_xy_at_progress(state.planner_progress_m)
     lat, lon = _planner_m_to_latlon(x_m, y_m)
+    validation = _validate_planner_points(state.planner_path_m) if len(state.planner_path_m) >= 2 else None
     return {
         "enabled": state.planner_enabled,
         "paused": state.planner_paused,
@@ -1789,6 +1907,10 @@ async def planner_status():
         "total_length_m": round(state.planner_total_length_m, 2),
         "position": {"x_m": x_m, "y_m": y_m, "lat": lat, "lon": lon, "heading_deg": round(heading, 1)},
         "waypoints": _planner_geo_route(),
+        "min_depth_m": validation.get("min_depth_m") if validation else None,
+        "sample_count": validation.get("samples_checked", 0) if validation else 0,
+        "blocked_samples": validation.get("blocked_samples", 0) if validation else 0,
+        "validation": validation,
     }
 
 # ---------------------------------------------------------------------------
@@ -2217,121 +2339,6 @@ async def get_mag_correction():
 
 
 # ---------------------------------------------------------------------------
-# React planner WebSocket endpoint
-# ---------------------------------------------------------------------------
-
-async def _planner_ws_send_status(ws: WebSocket, sim_state: str) -> None:
-    await ws.send_json({"type": "status", "state": sim_state})
-
-
-def _parse_planner_points(raw_points: Any) -> list[tuple[float, float]]:
-    if not isinstance(raw_points, list):
-        raise ValueError("waypoints must be a list")
-    points: list[tuple[float, float]] = []
-    for raw in raw_points:
-        if not isinstance(raw, list | tuple) or len(raw) != 2:
-            raise ValueError("planner waypoints must be [x_m, y_m] pairs")
-        x_m, y_m = float(raw[0]), float(raw[1])
-        if not (math.isfinite(x_m) and math.isfinite(y_m)):
-            raise ValueError("planner waypoint coordinates must be finite")
-        points.append((x_m, y_m))
-    return points
-
-
-@app.websocket("/planner/ws")
-async def planner_websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    path: list[tuple[float, float]] = []
-    starts: list[float] = []
-    total_length_m = 0.0
-    progress_m = 0.0
-    sim_time_s = 0.0
-    sim_state = "idle"
-    cov = [row[:] for row in PLANNER_INIT_COV]
-    current_segment = 0
-
-    await _planner_ws_send_status(ws, sim_state)
-    last_status_sent = sim_state
-    try:
-        while True:
-            try:
-                text = await asyncio.wait_for(ws.receive_text(), timeout=PLANNER_TICK_DT)
-            except asyncio.TimeoutError:
-                text = None
-
-            if text is not None:
-                try:
-                    import json
-                    msg = json.loads(text)
-                    msg_type = msg.get("type")
-                    if msg_type == "set_path":
-                        path = _parse_planner_points(msg.get("waypoints"))
-                        starts, total_length_m = _metric_path(path)
-                        progress_m = 0.0
-                        sim_time_s = 0.0
-                        cov = [row[:] for row in PLANNER_INIT_COV]
-                        current_segment = 0
-                        sim_state = "idle"
-                        if len(path) >= 2 and total_length_m > 0.0:
-                            _set_planner_path(path)
-                        else:
-                            _clear_planner_path()
-                    elif msg_type == "play":
-                        if len(path) >= 2 and total_length_m > 0.0 and sim_state != "done":
-                            sim_state = "running"
-                            if state.planner_enabled and not state.planner_done:
-                                state.planner_paused = False
-                    elif msg_type == "pause":
-                        if sim_state == "running":
-                            sim_state = "paused"
-                        if state.planner_enabled and not state.planner_done:
-                            state.planner_paused = True
-                    elif msg_type == "reset":
-                        path = []
-                        starts = []
-                        total_length_m = 0.0
-                        progress_m = 0.0
-                        sim_time_s = 0.0
-                        cov = [row[:] for row in PLANNER_INIT_COV]
-                        current_segment = 0
-                        sim_state = "idle"
-                        _clear_planner_path()
-                except Exception as exc:
-                    await ws.send_json({"type": "error", "message": str(exc)})
-
-            if sim_state == "running":
-                sim_time_s += PLANNER_TICK_DT
-                progress_m = min(total_length_m, progress_m + PLANNER_SPEED_MS * PLANNER_TICK_DT)
-                cov[0][0] += PLANNER_COV_GROWTH_DIAG * PLANNER_TICK_DT
-                cov[1][1] += PLANNER_COV_GROWTH_DIAG * PLANNER_TICK_DT
-                cov[0][1] += PLANNER_COV_GROWTH_OFFDIAG * PLANNER_TICK_DT
-                cov[1][0] = cov[0][1]
-                while current_segment + 1 < len(path) - 1 and progress_m >= starts[current_segment + 1]:
-                    current_segment += 1
-                    cov[0][0] *= PLANNER_LANDMARK_FIX
-                    cov[1][1] *= PLANNER_LANDMARK_FIX
-                    cov[0][1] *= PLANNER_LANDMARK_FIX
-                    cov[1][0] = cov[0][1]
-                if progress_m >= total_length_m:
-                    progress_m = total_length_m
-                    sim_state = "done"
-
-                mean_x, mean_y = _xy_on_metric_path(path, starts, total_length_m, progress_m)
-                await ws.send_json({
-                    "type": "tick",
-                    "t": sim_time_s,
-                    "mean": [mean_x, mean_y],
-                    "cov": cov,
-                })
-
-            if sim_state != last_status_sent:
-                await _planner_ws_send_status(ws, sim_state)
-                last_status_sent = sim_state
-    except WebSocketDisconnect:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/ws")
@@ -2350,67 +2357,6 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         state.websockets.discard(ws)
-
-# ---------------------------------------------------------------------------
-# Embedded React planner
-# ---------------------------------------------------------------------------
-
-def _planner_unavailable_response() -> HTMLResponse:
-    return HTMLResponse(
-        """
-        <!doctype html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>React Planner Not Built</title>
-          <style>
-            body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08111f;color:#d0d8e8;font-family:Segoe UI,system-ui,sans-serif}
-            main{max-width:520px;padding:24px;border:1px solid rgba(0,212,170,.18);background:#0f1f38;border-radius:6px}
-            h1{font-size:18px;margin:0 0 10px;color:#00d4aa}
-            p{font-size:13px;line-height:1.5;color:#9fb0c8}
-            code{color:#d0d8e8}
-          </style>
-        </head>
-        <body>
-          <main>
-            <h1>React planner is not built</h1>
-            <p>Run <code>cd frontend/web && npm run build</code>, then reload the command center planner.</p>
-          </main>
-        </body>
-        </html>
-        """,
-        status_code=503,
-    )
-
-
-def _serve_planner_file(asset_path: str = ""):
-    if not PLANNER_INDEX.is_file():
-        return _planner_unavailable_response()
-    if not asset_path:
-        return FileResponse(PLANNER_INDEX)
-
-    dist_root = PLANNER_DIST_DIR.resolve()
-    requested = (PLANNER_DIST_DIR / asset_path).resolve()
-    if requested != dist_root and dist_root not in requested.parents:
-        raise HTTPException(status_code=404, detail="Planner asset not found")
-    if requested.is_file():
-        return FileResponse(requested)
-    return FileResponse(PLANNER_INDEX)
-
-
-@app.head("/planner", include_in_schema=False)
-@app.head("/planner/", include_in_schema=False)
-@app.get("/planner", include_in_schema=False)
-@app.get("/planner/", include_in_schema=False)
-async def planner_index():
-    return _serve_planner_file()
-
-
-@app.head("/planner/{asset_path:path}", include_in_schema=False)
-@app.get("/planner/{asset_path:path}", include_in_schema=False)
-async def planner_asset(asset_path: str):
-    return _serve_planner_file(asset_path)
 
 # ---------------------------------------------------------------------------
 # Sensor simulator (background asyncio task)
@@ -2503,7 +2449,7 @@ async def _simulator_loop() -> None:
             "timestamp": _last_ts("barometer"),
         })
 
-        # ---- GPS: embedded planner route, or fallback slow survey pattern ----
+        # ---- GPS: active route, or fallback slow survey pattern ----
         if state.planner_enabled:
             x_m, y_m, heading = _advance_planner_route(step_m)
             lat, lon = _planner_m_to_latlon(x_m, y_m)

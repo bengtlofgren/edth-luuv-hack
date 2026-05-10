@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-src 'self'; child-src 'self'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.openseamap.org https://ows.emodnet-bathymetry.eu; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: http: https:;">
 <title>Maritime Mission Planner — Demo 5: Command Center</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H">
 <style>
@@ -81,7 +81,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .replay-speed.active{background:rgba(0,212,170,0.15);color:#00d4aa;border-color:#00d4aa}
 .export-btn{background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.3);color:#00d4aa;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px;font-family:inherit;transition:all 0.15s;margin-right:6px;margin-bottom:4px}
 .export-btn:hover{background:rgba(0,212,170,0.2);border-color:#00d4aa}
-.planner-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.planner-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
 .planner-actions .export-btn{width:100%;margin:0}
 .planner-status-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;font-family:monospace;color:#d0d8e8}
 .planner-pill{border:1px solid rgba(122,138,160,0.28);border-radius:3px;padding:1px 7px;color:#7a8aa0;text-transform:uppercase;font-size:9px;letter-spacing:.6px}
@@ -92,16 +92,6 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 #planner-progress-fill{height:100%;width:0;background:#7fb3d5;transition:width .2s ease}
 #planner-distance{font-size:10px;color:#7a8aa0;font-family:monospace}
 .planner-route-dot{width:14px;height:14px;border-radius:50%;background:#7fb3d5;border:2px solid #08111f;box-shadow:0 0 8px rgba(127,179,213,.8)}
-#planner-drawer{position:absolute;top:48px;left:12px;right:344px;bottom:48px;z-index:25;display:none;flex-direction:column;background:#08111f;border:1px solid rgba(0,212,170,0.24);box-shadow:0 12px 40px rgba(0,0,0,0.45);border-radius:6px;overflow:hidden}
-#planner-drawer.visible{display:flex}
-#planner-header{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:#0f1f38;border-bottom:1px solid rgba(0,212,170,0.16)}
-#planner-header span{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#00d4aa}
-#planner-close{background:transparent;border:1px solid rgba(122,138,160,0.3);color:#d0d8e8;width:26px;height:24px;border-radius:4px;cursor:pointer;font-size:16px;line-height:18px}
-#planner-close:hover{border-color:#00d4aa;color:#00d4aa}
-#planner-frame{width:100%;height:100%;border:0;background:#08111f}
-.planner-launch{width:100%;margin:0 0 6px 0}
-.planner-note{font-size:10px;color:#7a8aa0;line-height:1.35}
-@media(max-width:900px){#planner-drawer{top:42px;left:8px;right:8px;bottom:40px}}
 #gpsdeny-btn.denied{background:rgba(212,64,64,0.2)!important;border-color:#d44040!important;color:#d44040!important;animation:pulse 1.5s infinite}
 #gpsdeny-btn.gps-active{background:rgba(0,212,100,0.15);border-color:#00d46a;color:#00d46a}
 #mag-btn.mag-off{background:rgba(212,160,0,0.16)!important;border-color:#d4a000!important;color:#d4a000!important}
@@ -183,7 +173,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     </div>
   </div>
   <div class="panel">
-    <div class="panel-title">Waypoints <span style="float:right;color:#5a6a80;font-size:9px">Shift+Click to add</span></div>
+    <div class="panel-title">Waypoints</div>
     <div id="wp-list" style="max-height:120px;overflow-y:auto"><div style="color:#5a6a80;font-size:11px">No waypoints</div></div>
   </div>
   <div class="panel">
@@ -215,7 +205,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     </div>
   </div>
   <div class="panel">
-    <div class="panel-title">React Planner</div>
+    <div class="panel-title">Route Planner</div>
     <div class="planner-status-row">
       <span id="planner-state-pill" class="planner-pill">Idle</span>
       <span id="planner-progress-label">-- / -- m</span>
@@ -223,7 +213,6 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <div class="planner-progress-track"><div id="planner-progress-fill"></div></div>
     <div id="planner-distance">No active route</div>
     <div class="planner-actions">
-      <button class="export-btn" onclick="window.openPlanner()">Open</button>
       <button class="export-btn" onclick="window.focusPlannerRoute()">Focus</button>
       <button class="export-btn" onclick="window.clearPlannerRoute()">Clear</button>
       <button class="export-btn" onclick="window.fetchPlannerStatus()">Refresh</button>
@@ -273,19 +262,11 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 
 <div id="replay-badge">REPLAY</div>
 
-<div id="planner-drawer" aria-hidden="true">
-  <div id="planner-header">
-    <span>React Mission Planner</span>
-    <button id="planner-close" type="button" onclick="window.closePlanner()" aria-label="Close planner">&times;</button>
-  </div>
-  <iframe id="planner-frame" title="React mission planner" src="about:blank"></iframe>
-</div>
-
 <div id="status-bar">
   <div id="status-left">MARITIME MISSION PLANNER &mdash; Demo 5: Command Center</div>
   <div id="status-right">
     <span id="sim-banner">SIMULATED DATA</span><span id="data-source" style="display:none">DATA: Live</span>
-    <span id="planner-banner">Planner Route</span>
+    <span id="planner-banner">Route</span>
     <span id="gpsdeny-banner">GPS DENIED — Dead Reckoning</span>
     <span><span id="status-dot" class="connecting"></span><span id="status-text">Connecting...</span></span>
     <span id="rec-badge">REC</span>
@@ -307,7 +288,7 @@ var recording=false,recStartTime=null,recTimer=null,showingReplay=false,replayPo
 var map=null,vesselMarker=null,trackPolyline=null,ws=null,vessel2Marker=null,vessel2TrackPolyline=null;
 var reconnectTimer=null,countdownTimer=null,wpMarkers=[],riskLayerGroup=L.layerGroup(),riskTimer=null;
 var gpsDenied=false,magCorrection=true,drMarker=null,gpsFrozenMarker=null,uncertaintyEllipse=null,navUncertaintyEllipse=null,drConnectionLine=null,drTimer=null,drDeniedStart=null;
-var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false;
+var plannerTimer=null,plannerRouteLine=null,plannerRouteMarkers=[],plannerRouteKey='',plannerAutoFit=false,routePlanning=false;
 var showTracks=true,showUncertainty=true,showSupport=true,healthTimer=null,eventTimer=null;
 var MAX_DISPLAY_ZOOM=22,tileFallbackShown=false;
 
@@ -604,16 +585,15 @@ function updateDataSource(){var el=document.getElementById('data-source');var si
 function triggerDownload(url,name){fetch(url).then(function(r){return r.blob();}).then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}).catch(function(){});}
 function exportGeoJSON(){triggerDownload('/api/export/geojson','mission_tracks.geojson');}
 function exportCSV(){triggerDownload('/api/export/csv','mission_data.csv');}
-function openPlanner(){var d=document.getElementById('planner-drawer');var f=document.getElementById('planner-frame');if(!d||!f)return;if(f.getAttribute('src')==='about:blank')f.setAttribute('src','/planner/');d.className='visible';d.setAttribute('aria-hidden','false');}
-function closePlanner(){var d=document.getElementById('planner-drawer');if(!d)return;d.className='';d.setAttribute('aria-hidden','true');}
 function clearPlannerLayers(){if(plannerRouteLine&&map){map.removeLayer(plannerRouteLine);}plannerRouteLine=null;plannerRouteMarkers.forEach(function(m){if(map)map.removeLayer(m);});plannerRouteMarkers=[];plannerRouteKey='';plannerAutoFit=false;}
 function setPlannerPill(label,cls){var el=document.getElementById('planner-state-pill');if(!el)return;el.textContent=label;el.className='planner-pill'+(cls?' '+cls:'');}
-function updatePlannerRouteLayer(d){if(!map)return;var wps=d&&Array.isArray(d.waypoints)?d.waypoints:[];if(!d.enabled||wps.length<2){clearPlannerLayers();return;}var coords=wps.map(function(w){return[w.lat,w.lon];});var key=coords.map(function(c){return c[0].toFixed(6)+','+c[1].toFixed(6);}).join('|');if(key!==plannerRouteKey){clearPlannerLayers();plannerRouteKey=key;plannerRouteLine=L.polyline(coords,{color:'#7fb3d5',weight:4,opacity:.95,dashArray:'10,8',lineCap:'round'}).addTo(map);plannerRouteLine.bindTooltip('Embedded planner route',{sticky:true});plannerRouteMarkers=coords.map(function(c,i){return L.circleMarker(c,{radius:i===0||i===coords.length-1?5:4,color:'#08111f',weight:2,fillColor:'#7fb3d5',fillOpacity:1,zIndexOffset:650}).addTo(map);});if(!plannerAutoFit&&plannerRouteLine.getBounds().isValid()){map.fitBounds(plannerRouteLine.getBounds(),{padding:[40,40],maxZoom:16});plannerAutoFit=true;}}}
-function updatePlannerPanel(d){var enabled=!!(d&&d.enabled);var paused=!!(d&&d.paused);var done=!!(d&&d.done);var progress=d&&d.progress_m!=null?d.progress_m:0;var total=d&&d.total_length_m!=null?d.total_length_m:0;var pct=total>0?Math.min(100,Math.max(0,(progress/total)*100)):0;var fill=document.getElementById('planner-progress-fill');var label=document.getElementById('planner-progress-label');var dist=document.getElementById('planner-distance');var banner=document.getElementById('planner-banner');if(fill)fill.style.width=pct.toFixed(1)+'%';if(label)label.textContent=total>0?progress.toFixed(1)+' / '+total.toFixed(1)+' m':'-- / -- m';if(dist){var count=d&&Array.isArray(d.waypoints)?d.waypoints.length:0;dist.textContent=enabled?count+' pts | '+pct.toFixed(0)+'% complete':'No active route';}if(banner){banner.className=enabled?'visible':'';banner.textContent=paused?'Planner Paused':done?'Planner Done':'Planner Route';}if(!enabled)setPlannerPill('Idle','');else if(paused)setPlannerPill('Paused','paused');else if(done)setPlannerPill('Done','done');else setPlannerPill('Active','active');}
+function updatePlannerRouteLayer(d){if(!map)return;var wps=d&&Array.isArray(d.waypoints)?d.waypoints:[];if(!d.enabled||wps.length<2){clearPlannerLayers();return;}var coords=wps.map(function(w){return[w.lat,w.lon];});var key=coords.map(function(c){return c[0].toFixed(6)+','+c[1].toFixed(6);}).join('|');if(key!==plannerRouteKey){clearPlannerLayers();plannerRouteKey=key;plannerRouteLine=L.polyline(coords,{color:'#7fb3d5',weight:4,opacity:.95,dashArray:'10,8',lineCap:'round'}).addTo(map);plannerRouteLine.bindTooltip('Active route',{sticky:true});plannerRouteMarkers=coords.map(function(c,i){return L.circleMarker(c,{radius:i===0||i===coords.length-1?5:4,color:'#08111f',weight:2,fillColor:'#7fb3d5',fillOpacity:1,zIndexOffset:650}).addTo(map);});if(!plannerAutoFit&&plannerRouteLine.getBounds().isValid()){map.fitBounds(plannerRouteLine.getBounds(),{padding:[40,40],maxZoom:16});plannerAutoFit=true;}}}
+function updatePlannerPanel(d){var enabled=!!(d&&d.enabled);var paused=!!(d&&d.paused);var done=!!(d&&d.done);var progress=d&&d.progress_m!=null?d.progress_m:0;var total=d&&d.total_length_m!=null?d.total_length_m:0;var pct=total>0?Math.min(100,Math.max(0,(progress/total)*100)):0;var fill=document.getElementById('planner-progress-fill');var label=document.getElementById('planner-progress-label');var dist=document.getElementById('planner-distance');var banner=document.getElementById('planner-banner');var minDepth=d&&d.min_depth_m!=null?d.min_depth_m:null;if(fill)fill.style.width=pct.toFixed(1)+'%';if(label)label.textContent=total>0?progress.toFixed(1)+' / '+total.toFixed(1)+' m':'-- / -- m';if(dist){var count=d&&Array.isArray(d.waypoints)?d.waypoints.length:0;var depthLabel=minDepth!=null?' | min depth '+Number(minDepth).toFixed(1)+' m':'';dist.textContent=enabled?count+' pts | '+pct.toFixed(0)+'% complete'+depthLabel:'No active route';}if(banner){if(enabled){banner.className='visible';banner.textContent=(paused?'Route Paused':done?'Route Done':'Route')+' '+progress.toFixed(0)+'/'+total.toFixed(0)+' m';}else{banner.className='';banner.textContent='Route';}}if(!enabled)setPlannerPill('Idle','');else if(paused)setPlannerPill('Paused','paused');else if(done)setPlannerPill('Done','done');else setPlannerPill('Active','active');}
 function updatePlannerStatus(d){updatePlannerPanel(d);updatePlannerRouteLayer(d);}
 function fetchPlannerStatus(){return fetch('/api/planner/status').then(function(r){return r.json();}).then(updatePlannerStatus).catch(function(){});}
 function clearPlannerRoute(){fetch('/api/planner/clear',{method:'POST'}).then(function(r){return r.json();}).then(updatePlannerStatus).catch(function(){});}
 function focusPlannerRoute(){if(plannerRouteLine&&plannerRouteLine.getBounds().isValid()){map.fitBounds(plannerRouteLine.getBounds(),{padding:[40,40],maxZoom:16});}else if(vesselMarker){map.panTo(vesselMarker.getLatLng(),{animate:true,duration:.3});}}
+function planRouteToLatLng(ll){if(routePlanning)return;routePlanning=true;var banner=document.getElementById('planner-banner');if(banner){banner.className='visible';banner.textContent='Planning Route';}var body={lat:ll.lat,lon:ll.lng,start_lat:state.lat,start_lon:state.lon};fetch('/api/route/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||'Route failed');});return r.json();}).then(function(d){routePlanning=false;plannerAutoFit=false;updatePlannerStatus(d);fetchRisk();fetchEvents();}).catch(function(err){routePlanning=false;fetchPlannerStatus();showToast(err.message||'Route failed');});}
 
 Object.assign(window,{
   toggleGpsDenial:toggleGpsDenial,
@@ -632,11 +612,10 @@ Object.assign(window,{
   toggleTracks:toggleTracks,
   toggleUncertainty:toggleUncertainty,
   toggleSupport:toggleSupport,
-  openPlanner:openPlanner,
-  closePlanner:closePlanner,
   clearPlannerRoute:clearPlannerRoute,
   focusPlannerRoute:focusPlannerRoute,
-  fetchPlannerStatus:fetchPlannerStatus
+  fetchPlannerStatus:fetchPlannerStatus,
+  planRouteToLatLng:planRouteToLatLng
 });
 
 // Tile layers
@@ -677,7 +656,8 @@ ws.onerror=function(){};
 function initMap(lat,lon){
 map=L.map('map',{center:[lat,lon],zoom:16,maxZoom:MAX_DISPLAY_ZOOM,zoomControl:true,attributionControl:true});
 riskLayerGroup.addTo(map);ensureTiles();baseLayers.osm.addTo(map);overlays.nautical.addTo(map);
-map.on('click',function(e){var ll=e.latlng;var content=ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br><span style="color:#7a8aa0">Fetching depth...</span>';var popup=L.popup().setLatLng(ll).setContent(content).openOn(map);fetch('/api/depth?lat='+ll.lat.toFixed(6)+'&lon='+ll.lng.toFixed(6)).then(function(r){return r.json();}).then(function(d){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6)+'<br>Depth: <b>'+(d.depth_m?d.depth_m.toFixed(1)+' m':'no data / land')+'</b>');}).catch(function(){popup.setContent(ll.lat.toFixed(6)+', '+ll.lng.toFixed(6));});});
+var wpMode=false;
+map.on('click',function(e){if(wpMode)return;planRouteToLatLng(e.latlng);});
 map.on('dragstart',function(){if(state.follow){state.follow=false;var fb=document.querySelector('.follow-btn');if(fb){fb.innerHTML='Follow: OFF';fb.classList.remove('active');}}});
 
 var baseCtrl=L.control({position:'topleft'});
@@ -689,15 +669,10 @@ var followCtrl=L.control({position:'topleft'});
 followCtrl.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn follow-btn');btn.innerHTML='Follow: OFF';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){state.follow=!state.follow;btn.innerHTML='Follow: '+(state.follow?'ON':'OFF');btn.classList.toggle('active',state.follow);if(state.follow&&vesselMarker)map.panTo(vesselMarker.getLatLng(),{animate:true,duration:0.3});});return btn;};
 followCtrl.addTo(map);
 
-var plannerCtrl=L.control({position:'topleft'});
-plannerCtrl.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn');btn.innerHTML='Planner';btn.title='Open embedded React mission planner';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){openPlanner();});return btn;};
-plannerCtrl.addTo(map);
-
 var wpEditBtn=L.control({position:'topleft'});
 wpEditBtn.onAdd=function(){var btn=L.DomUtil.create('button','leaflet-bar map-btn');btn.innerHTML='+ WP';btn.title='Toggle waypoint placement mode';L.DomEvent.disableClickPropagation(btn);L.DomEvent.addListener(btn,'click',function(){wpMode=!wpMode;btn.classList.toggle('active',wpMode);btn.innerHTML=wpMode?'+ WP ON':'+ WP';map.getContainer().style.cursor=wpMode?'crosshair':'';});return btn;};
 wpEditBtn.addTo(map);
 
-var wpMode=false;
 map.on('click',function(e){if(!wpMode)return;if(wpMarkers.length>=50){showToast('Max 50 waypoints');return;}var lat=e.latlng.lat,lon=e.latlng.lng;var popup=L.popup().setLatLng(e.latlng).setContent('Adding waypoint...').openOn(map);fetch('/api/waypoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:lat,lon:lon})}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||'Land');});return r.json();}).then(function(wp){map.closePopup(popup);addWaypointMarker(wp);fetchRisk();}).catch(function(err){map.closePopup(popup);showToast(err.message.indexOf('land')!==-1||err.message.indexOf('shallow')!==-1?'Cannot place here — on land or too shallow for USV':err.message);});});
 }
 
@@ -723,9 +698,8 @@ function checkGpsDenialStatus(){
     if(d.denied){setGpsDeniedState(true);}
   }).catch(function(){});
 }
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closePlanner();});
 // Init
-document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);fetchMagCorrection();fetchCalibration();fetchDvlStatus();fetchHealth();fetchEvents();fetchRecordingList();setInterval(fetchDvlStatus,5000);healthTimer=setInterval(fetchHealth,3000);eventTimer=setInterval(fetchEvents,5000);if(window.location.hash==='#planner')openPlanner();});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
+document.addEventListener('DOMContentLoaded',function(){var initLat=55.560,initLon=14.363;fetch('/api/state').then(function(r){return r.json();}).then(function(d){if(d.lat!=null&&d.lon!=null){initLat=d.lat;initLon=d.lon;state.lat=d.lat;state.lon=d.lon;state.speed=d.speed_kn||0;state.heading=d.heading_deg!=null?d.heading_deg:null;}}).catch(function(){}).then(function(){initMap(initLat,initLon);return fetch('/api/track');}).then(function(r){return r.json();}).then(function(geojson){if(geojson&&geojson.type==='Feature'&&geojson.geometry){var coords=geojson.geometry.coordinates||[];coords.forEach(function(c){if(Array.isArray(c)&&c.length>=2)state.trackPoints.push([c[1],c[0]]);});}refreshTrack();}).catch(function(){}).then(function(){updateVesselMarker(state.lat,state.lon,state.heading);updateSidebarGPS(state.lat,state.lon,state.speed,state.heading);drawCompass(state.heading);updateFleetPanel();connectWS();fetch('/api/waypoints').then(function(r){return r.json();}).then(function(wps){wps.forEach(function(wp){addWaypointMarker(wp);});fetchRisk();});riskTimer=setInterval(fetchRisk,5000);fetchPlannerStatus();plannerTimer=setInterval(fetchPlannerStatus,1000);fetchMagCorrection();fetchCalibration();fetchDvlStatus();fetchHealth();fetchEvents();fetchRecordingList();setInterval(fetchDvlStatus,5000);healthTimer=setInterval(fetchHealth,3000);eventTimer=setInterval(fetchEvents,5000);});checkGpsDenialStatus();fetch('/api/replay/status').then(function(r){return r.json();}).then(function(d){if(d.active){showingReplay=true;updateDataSource();document.getElementById('replay-badge').style.display='';pollReplayStatus();}}).catch(function(){});
 });
 })();
 </script>

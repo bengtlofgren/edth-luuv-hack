@@ -500,11 +500,11 @@ class TestApiTrack:
 
 
 # ===================================================================
-# Embedded planner route control
+# Route control
 # ===================================================================
 
 
-class TestEmbeddedPlanner:
+class TestRoutePlanner:
     @pytest.mark.asyncio
     async def test_planner_route_lifecycle(self, monkeypatch):
         clean_app = _fresh_app(monkeypatch)
@@ -551,6 +551,56 @@ class TestEmbeddedPlanner:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.post("/api/planner/path", json={"waypoints": [[1, 1], [1, 1]]})
             assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_click_route_plan_activates_route(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/api/route/plan",
+                json={
+                    "start_lat": 55.5601,
+                    "start_lon": 14.3626,
+                    "lat": 55.5601,
+                    "lon": 14.38,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "route_active"
+            assert data["enabled"] is True
+            assert data["total_length_m"] > 0
+            assert data["min_depth_m"] >= src.server.ROUTE_MIN_DEPTH_M
+            assert len(data["waypoints"]) >= 2
+
+            status = (await ac.get("/api/planner/status")).json()
+            assert status["enabled"] is True
+            assert status["total_length_m"] == pytest.approx(data["total_length_m"])
+
+    @pytest.mark.asyncio
+    async def test_click_route_rejects_land_destination(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/api/route/plan",
+                json={
+                    "start_lat": 55.5601,
+                    "start_lon": 14.3626,
+                    "lat": 55.0,
+                    "lon": 14.0,
+                },
+            )
+            assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_planner_page_is_not_exposed(self, monkeypatch):
+        clean_app = _fresh_app(monkeypatch)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/planner")
+            assert resp.status_code == 404
 
     def test_planner_advances_exact_metric_distance(self, monkeypatch):
         _fresh_app(monkeypatch)
@@ -784,7 +834,7 @@ class TestRisk:
 
     @pytest.mark.asyncio
     async def test_risk_uses_planner_route_without_waypoints(self, monkeypatch):
-        """Risk follows the embedded planner route even when map waypoints are empty."""
+        """Risk follows the active route even when map waypoints are empty."""
         clean_app = _fresh_app(monkeypatch)
         transport = ASGITransport(app=clean_app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1453,11 +1503,11 @@ class TestMagnetometer:
 
 
 # ===================================================================
-# 66-67.  Live DVL and embedded planner WebSocket
+# 66-67.  Live DVL and route exposure
 # ===================================================================
 
 
-class TestLiveDvlAndPlannerWs:
+class TestLiveDvlAndRouteExposure:
     @pytest.mark.asyncio
     async def test_live_dvl_ingest_and_status(self, monkeypatch):
         clean_app = _fresh_app(monkeypatch)
@@ -1483,18 +1533,13 @@ class TestLiveDvlAndPlannerWs:
             assert resp.status_code == 200
             assert resp.json()["raw_measurements"] == 1
 
-    def test_fastapi_serves_planner_websocket(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_planner_websocket_is_not_exposed(self, monkeypatch):
         clean_app = _fresh_app(monkeypatch)
-        with StarletteTestClient(clean_app).websocket_connect("/planner/ws") as ws:
-            first = ws_receive(ws)
-            assert first == {"type": "status", "state": "idle"}
-
-            ws.send_json({"type": "set_path", "waypoints": [[0.0, 0.0], [2.0, 0.0]]})
-            ws.send_json({"type": "play"})
-
-            messages = [ws_receive(ws) for _ in range(4)]
-            assert any(msg["type"] == "tick" for msg in messages)
-            assert any(msg == {"type": "status", "state": "running"} for msg in messages)
+        transport = ASGITransport(app=clean_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/planner/ws")
+            assert resp.status_code == 404
 
 
 class TestOperatorHardening:
