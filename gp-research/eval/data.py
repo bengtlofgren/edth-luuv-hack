@@ -121,6 +121,9 @@ def load_solaqua_bag(filename, data_id=None, timeout=15):
       a50:    dict(t=(n,), v=(n,3) m/s, fom=(n,))          -- WaterLinked A50
       imu:    dict(t=(m,), f=(m,3) m/s^2, w=(m,3) rad/s)   -- specific force / rate
       nortek: dict(t=(k,), v=(k,3) m/s) or None            -- independent 2nd DVL
+      thrust: dict(t=(p,), u=(p,4)) or None                -- commanded thrust,
+              RC channels 2..5 of /commanded_thrust, normalized (pwm-1500)/400
+              so 0 = neutral, +-1 ~= full deflection; 65535 (not driven) -> 0
       imu_style, filename: passthrough metadata.
     """
     from rosbags.highlevel import AnyReader  # heavy/optional; import lazily
@@ -132,9 +135,10 @@ def load_solaqua_bag(filename, data_id=None, timeout=15):
     path = _locate_or_download(filename, data_id, timeout=timeout)
     imu_topic = cfg["imu_topic"]
 
-    a50, imu, nortek = [], [], []
+    a50, imu, nortek, thrust = [], [], [], []
     with AnyReader([path]) as r:
-        topics = ("/sensor/dvl_velocity", imu_topic, "/nucleus1000dvl/bottomtrack")
+        topics = ("/sensor/dvl_velocity", imu_topic, "/nucleus1000dvl/bottomtrack",
+                  "/commanded_thrust")
         conns = [c for c in r.connections if c.topic in topics]
         for conn, ts, raw in r.messages(connections=conns):
             m = r.deserialize(raw, conn.msgtype)
@@ -148,6 +152,10 @@ def load_solaqua_bag(filename, data_id=None, timeout=15):
                                 m.gyroscope.x, m.gyroscope.y, m.gyroscope.z))
                 else:
                     imu.append((t, m.acc_x, m.acc_y, m.acc_z, m.gyro_x, m.gyro_y, m.gyro_z))
+            elif conn.topic == "/commanded_thrust":
+                u = np.asarray(m.data, float)[2:6]     # RC ch 2..5; rest unused/65535
+                u = np.where(u > 3000, 1500.0, u)      # 65535 sentinel = not driven
+                thrust.append((t, *((u - 1500.0) / 400.0)))
             else:
                 v = m.dvl_velocity_xyz
                 if m.data_valid and (v.x ** 2 + v.y ** 2 + v.z ** 2) ** 0.5 < 10.0:
@@ -161,6 +169,7 @@ def load_solaqua_bag(filename, data_id=None, timeout=15):
     a50 = np.asarray(a50, dtype=float)
     imu = np.asarray(imu, dtype=float)
     nortek = np.asarray(nortek, dtype=float) if nortek else np.empty((0, 4))
+    thrust = np.asarray(thrust, dtype=float) if thrust else np.empty((0, 5))
 
     imu[:, 1:4] *= cfg["acc_scale"]
     imu[:, 4:7] *= cfg["gyr_scale"]
@@ -170,11 +179,14 @@ def load_solaqua_bag(filename, data_id=None, timeout=15):
     imu[:, 0] -= t0
     if nortek.size:
         nortek[:, 0] -= t0
+    if thrust.size:
+        thrust[:, 0] -= t0
 
     return dict(
         a50=dict(t=a50[:, 0], v=a50[:, 1:4], fom=a50[:, 4]),
         imu=dict(t=imu[:, 0], f=imu[:, 1:4], w=imu[:, 4:7]),
         nortek=dict(t=nortek[:, 0], v=nortek[:, 1:4]) if nortek.size else None,
+        thrust=dict(t=thrust[:, 0], u=thrust[:, 1:5]) if thrust.size else None,
         imu_style=cfg["imu_style"],
         filename=filename,
     )

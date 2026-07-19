@@ -10,7 +10,12 @@ gp-research/eval/PLAN.md.
 Uses the eval/ package (data.py, bridges.py, seam.py, metrics.py) as a
 library; this script owns the sweep loop, the SOLAQUA-specific supplier
 wiring (all 3 axes for bridging, surge-only for the KF), and the
-aggregation/plots. See PLAN.md's "Protocol" and "SOLAQUA" sections for the
+aggregation/plots. Includes the control-conditioned dynamics-GP supplier
+(dyn_gp, PILCO-style: a = f(v, u_thrust) rolled forward with the commanded
+thrust the vehicle still knows during an outage); unlike the time-indexed
+causal GP it trains on ALL pre-gap data, not a trailing window -- the
+dynamics model assumes stationarity in (v, u), not in time, so the whole
+causal history is fair training data. See PLAN.md's "Protocol" and "SOLAQUA" sections for the
 exact per-gap design this implements.
 
 Axis convention (WaterLinked A50 body frame, verified empirically against
@@ -38,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # gp-research/ -> eval
 
 from eval.bridges import (
     GP_LS_BOUNDS_10HZ,
+    dynamics_bridge,
+    dynamics_calibrate,
     gp_bridge,
     hybrid_v1,
     hybrid_v2,
@@ -53,7 +60,7 @@ OUT_DIR = Path(__file__).resolve().parent / "eval_results"
 OUT_DIR.mkdir(exist_ok=True)
 
 AXIS_LABELS = ["surge", "sway", "heave"]
-KF_SUPPLIERS = {"causal_gp", "imu_dr", "hybrid_v2", "zoh"}
+KF_SUPPLIERS = {"causal_gp", "imu_dr", "hybrid_v2", "zoh", "dyn_gp"}
 GAP_LENGTHS = (10.0, 20.0)
 CAL_WINDOW_S = 60.0          # "trailing window up to 60 s back" for causal GP + IMU-DR calib
 FIRST_START = 25.0
@@ -64,9 +71,10 @@ KF_Q = 0.04 ** 2
 FOM_VAR_FLOOR = 1e-4
 
 C_GP, C_IMU, C_HYB2, C_HYB1, C_ZOH = "#2a78d6", "#1baf7a", "#4a3aa7", "#e87ba4", "#eb6834"
+C_DYN = "#d9962e"
 SUPPLIER_COLORS = {
     "causal_gp": C_GP, "acausal_gp": "#7fb2e8", "imu_dr": C_IMU,
-    "hybrid_v1": C_HYB1, "hybrid_v2": C_HYB2, "zoh": C_ZOH,
+    "hybrid_v1": C_HYB1, "hybrid_v2": C_HYB2, "zoh": C_ZOH, "dyn_gp": C_DYN,
 }
 
 
@@ -177,6 +185,23 @@ def process_gap(d, filename, group, gap_start, gap_len, pos_ref, var_meas_kf):
         "zoh": (zoh_mean, zoh_var),
     }
 
+    # --- control-conditioned dynamics GP (PILCO-style), if thrust is logged.
+    # Causal by construction: trains on all pre-gap (v, u) pairs, rolls the
+    # gap forward using the commanded thrust (known during a real outage).
+    dyncal = None
+    thr = d.get("thrust")
+    if thr is not None:
+        pre_v = t < gap_start
+        if pre_v.sum() >= 30 and (thr["t"] < gap_start).sum() >= 10:
+            dyncal = dynamics_calibrate(t[pre_v], v[pre_v], thr["t"], thr["u"])
+            t_dyn, mean_dyn, std_dyn = dynamics_bridge(
+                dyncal, v0, t0, thr["t"], thr["u"], gap_end, var0=var0)
+            dyn_mean = np.column_stack(
+                [np.interp(t_hid, t_dyn, mean_dyn[:, ax]) for ax in range(3)])
+            dyn_var = np.column_stack(
+                [np.interp(t_hid, t_dyn, std_dyn[:, ax]) for ax in range(3)]) ** 2
+            suppliers["dyn_gp"] = (dyn_mean, dyn_var)
+
     bridge_times = np.arange(gap_start + BRIDGE_SPACING_S / 2, gap_end, BRIDGE_SPACING_S)
     is_bridge = np.zeros(n, bool)
     for bt in bridge_times:
@@ -195,11 +220,14 @@ def process_gap(d, filename, group, gap_start, gap_len, pos_ref, var_meas_kf):
                 dynamic_ness=dyn, n_hidden=int(t_hid.size),
                 kf_vrmse=None, kf_honesty=None, kf_drift=None,
                 calib_s=None, calib_sigma_r=None, calib_sv_unconstrained=None,
+                dyn_lin_r2=None,
             )
             if sup in ("imu_dr", "hybrid_v1", "hybrid_v2"):
                 rec.update(calib_s=float(calib.s),
                            calib_sigma_r=calib.sigma_r.tolist(),
                            calib_sv_unconstrained=calib.sv_unconstrained.tolist())
+            if sup == "dyn_gp" and dyncal is not None:
+                rec.update(dyn_lin_r2=dyncal.lin_r2.tolist())
             if sup in KF_SUPPLIERS and ax == 0:
                 full_mean = np.zeros(n); full_var = np.zeros(n)
                 full_mean[in_gap] = mean[:, 0]; full_var[in_gap] = var[:, 0]
@@ -315,7 +343,7 @@ def fmt_mi(vals):
     return f"{m*100:6.2f} [{lo*100:5.2f}, {hi*100:5.2f}] cm/s (n={len(vals)})"
 
 
-SUPPLIERS_ORDER = ["causal_gp", "acausal_gp", "imu_dr", "hybrid_v1", "hybrid_v2", "zoh"]
+SUPPLIERS_ORDER = ["causal_gp", "acausal_gp", "dyn_gp", "imu_dr", "hybrid_v1", "hybrid_v2", "zoh"]
 
 
 def build_summary(records, bag_reports, load_failures):
@@ -457,8 +485,8 @@ def build_summary(records, bag_reports, load_failures):
             lines.append(f"- {sup:12s}: {np.mean(vals)*100:5.1f}% (n={len(vals)})")
     lines.append("")
 
-    lines.append("## 5. KF metrics (surge only, causal_gp/imu_dr/hybrid_v2/zoh)\n")
-    for sup in ["causal_gp", "imu_dr", "hybrid_v2", "zoh"]:
+    lines.append("## 5. KF metrics (surge only)\n")
+    for sup in ["causal_gp", "dyn_gp", "imu_dr", "hybrid_v2", "zoh"]:
         recs = filt(records, supplier=sup, axis="surge")
         vrmse = [r["kf_vrmse"] for r in recs if r["kf_vrmse"] is not None]
         hon = [r["kf_honesty"] for r in recs if r["kf_honesty"] is not None]
@@ -467,6 +495,43 @@ def build_summary(records, bag_reports, load_failures):
                      f"honesty median {np.median(hon):.2f}x (n={len(hon)}); "
                      f"peak drift median {np.median(dft):.3f} m (n={len(dft)})"
                      if vrmse else f"- {sup:12s}: n=0")
+    lines.append("")
+
+    lines.append("## 6b. Dynamics-GP claim -- control-conditioned dynamics GP vs "
+                 "causal GP and ZOH (surge)\n")
+    lines.append("Trains a = f(v, u_thrust) on all pre-gap data (semi-parametric: "
+                 "ridge thrust-gain/damping mean + GP residual), rolls the gap "
+                 "forward with the commanded thrust.\n")
+    for label, cond in [("all gaps", lambda d: True),
+                         ("dynamic half (dynamic_ness >= median)", lambda d: d >= dyn_med),
+                         ("calm half (dynamic_ness < median)", lambda d: d < dyn_med)]:
+        pairs_dg, pairs_dz = [], []
+        for k, sups in by_gap.items():
+            if "dyn_gp" not in sups or "causal_gp" not in sups or "zoh" not in sups:
+                continue
+            if not cond(sups["dyn_gp"]["dynamic_ness"]):
+                continue
+            pairs_dg.append(sups["dyn_gp"]["bridge_rmse"] - sups["causal_gp"]["bridge_rmse"])
+            pairs_dz.append(sups["dyn_gp"]["bridge_rmse"] - sups["zoh"]["bridge_rmse"])
+        if not pairs_dg:
+            lines.append(f"- {label}: n=0 gaps with dyn_gp")
+            continue
+        w_g = float(np.mean(np.array(pairs_dg) < 0))
+        w_z = float(np.mean(np.array(pairs_dz) < 0))
+        m_g, lo_g, hi_g = median_iqr(pairs_dg)
+        m_z, lo_z, hi_z = median_iqr(pairs_dz)
+        lines.append(f"- {label} (n={len(pairs_dg)}):")
+        lines.append(f"    - dyn-GP minus causal-GP RMSE: median {m_g*100:.2f} "
+                     f"[{lo_g*100:.2f}, {hi_g*100:.2f}] cm/s "
+                     f"(dyn-GP wins {w_g*100:.0f}% of gaps)")
+        lines.append(f"    - dyn-GP minus ZOH RMSE: median {m_z*100:.2f} "
+                     f"[{lo_z*100:.2f}, {hi_z*100:.2f}] cm/s "
+                     f"(dyn-GP wins {w_z*100:.0f}% of gaps)")
+    r2s = [r["dyn_lin_r2"] for r in filt(records, supplier="dyn_gp", axis="surge")
+           if r.get("dyn_lin_r2")]
+    if r2s:
+        r2m = np.median(np.array(r2s), axis=0).round(3).tolist()
+        lines.append(f"- linear-mean R^2 median per axis [surge, sway, heave]: {r2m}")
     lines.append("")
 
     lines.append("## 6. IMU calibration diagnostics by bag group\n")
@@ -535,20 +600,30 @@ def make_figure(records):
     ax.set_title("(b) hybrid regret, surge, all gaps")
     ax.grid(alpha=0.25, lw=0.5)
 
-    # (c) IMU-vs-ZOH paired delta vs dynamic-ness.
+    # (c) paired delta vs dynamic-ness: IMU-DR and dyn-GP, each vs causal GP.
     ax = axes[2]
-    dyns, deltas = [], []
+    dyns_i, deltas_i, dyns_d, deltas_d = [], [], [], []
     for sups in by_gap.values():
-        if "imu_dr" not in sups or "zoh" not in sups:
+        if "causal_gp" not in sups:
             continue
-        dyns.append(sups["imu_dr"]["dynamic_ness"])
-        deltas.append((sups["zoh"]["bridge_rmse"] - sups["imu_dr"]["bridge_rmse"]) * 100)
-    if dyns:
-        ax.scatter(dyns, deltas, color=C_IMU, alpha=0.7, edgecolor="k", linewidth=0.3)
-        ax.axhline(0, color="k", lw=1, ls="--")
+        g = sups["causal_gp"]["bridge_rmse"]
+        if "imu_dr" in sups:
+            dyns_i.append(sups["imu_dr"]["dynamic_ness"])
+            deltas_i.append((g - sups["imu_dr"]["bridge_rmse"]) * 100)
+        if "dyn_gp" in sups:
+            dyns_d.append(sups["dyn_gp"]["dynamic_ness"])
+            deltas_d.append((g - sups["dyn_gp"]["bridge_rmse"]) * 100)
+    if dyns_i:
+        ax.scatter(dyns_i, deltas_i, color=C_IMU, alpha=0.7, edgecolor="k",
+                   linewidth=0.3, label="IMU-DR")
+    if dyns_d:
+        ax.scatter(dyns_d, deltas_d, color=C_DYN, alpha=0.7, edgecolor="k",
+                   linewidth=0.3, label="dyn-GP")
+    ax.axhline(0, color="k", lw=1, ls="--")
+    ax.legend(fontsize=8)
     ax.set_xlabel("dynamic-ness [m/s^2] (std of smoothed surge dv/dt)")
-    ax.set_ylabel("ZOH minus IMU-DR RMSE [cm/s]  (>0: IMU better)")
-    ax.set_title("(c) IMU vs ZOH paired delta vs dynamic-ness")
+    ax.set_ylabel("causal-GP minus supplier RMSE [cm/s]  (>0: supplier better)")
+    ax.set_title("(c) paired delta vs causal GP vs dynamic-ness")
     ax.grid(alpha=0.25, lw=0.5)
 
     fig.suptitle("SOLAQUA sweep: bridge RMSE, hybrid regret, IMU-vs-ZOH dynamics",

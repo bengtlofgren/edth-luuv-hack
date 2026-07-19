@@ -18,6 +18,7 @@
 - 10s gaps:
     - causal_gp   :   2.29 [ 2.11,  2.39] cm/s (n=4)
     - acausal_gp  :   2.43 [ 1.95,  2.89] cm/s (n=4)
+    - dyn_gp      :   3.97 [ 2.64,  6.00] cm/s (n=4)
     - imu_dr      :   2.95 [ 2.51,  3.25] cm/s (n=4)
     - hybrid_v1   :   2.42 [ 2.18,  2.53] cm/s (n=4)
     - hybrid_v2   :   2.32 [ 2.03,  2.56] cm/s (n=4)
@@ -25,6 +26,7 @@
 - 20s gaps:
     - causal_gp   :   2.29 [ 2.25,  2.33] cm/s (n=2)
     - acausal_gp  :   2.45 [ 2.36,  2.53] cm/s (n=2)
+    - dyn_gp      :   7.34 [ 4.58, 10.10] cm/s (n=2)
     - imu_dr      :   3.19 [ 2.89,  3.50] cm/s (n=2)
     - hybrid_v1   :   2.25 [ 2.22,  2.28] cm/s (n=2)
     - hybrid_v2   :   2.32 [ 2.32,  2.33] cm/s (n=2)
@@ -35,6 +37,7 @@
 - 10s gaps:
     - causal_gp   :   2.33 [ 1.89,  3.14] cm/s (n=15)
     - acausal_gp  :   3.17 [ 2.24,  3.43] cm/s (n=15)
+    - dyn_gp      :   4.15 [ 3.48,  4.78] cm/s (n=15)
     - imu_dr      :   3.11 [ 2.31,  3.98] cm/s (n=15)
     - hybrid_v1   :   2.30 [ 1.83,  3.30] cm/s (n=15)
     - hybrid_v2   :   2.29 [ 1.81,  3.11] cm/s (n=15)
@@ -42,6 +45,7 @@
 - 20s gaps:
     - causal_gp   :   2.50 [ 2.09,  2.77] cm/s (n=10)
     - acausal_gp  :   2.93 [ 2.40,  3.40] cm/s (n=10)
+    - dyn_gp      :   4.46 [ 3.74,  4.67] cm/s (n=10)
     - imu_dr      :   3.55 [ 2.59,  4.47] cm/s (n=10)
     - hybrid_v1   :   2.46 [ 2.11,  2.96] cm/s (n=10)
     - hybrid_v2   :   2.45 [ 2.05,  2.76] cm/s (n=10)
@@ -52,6 +56,7 @@
 - 10s gaps:
     - causal_gp   :   2.33 [ 1.89,  2.88] cm/s (n=19)
     - acausal_gp  :   2.87 [ 2.10,  3.36] cm/s (n=19)
+    - dyn_gp      :   4.15 [ 3.09,  5.11] cm/s (n=19)
     - imu_dr      :   3.11 [ 2.31,  3.61] cm/s (n=19)
     - hybrid_v1   :   2.37 [ 1.83,  3.02] cm/s (n=19)
     - hybrid_v2   :   2.29 [ 1.81,  2.90] cm/s (n=19)
@@ -59,6 +64,7 @@
 - 20s gaps:
     - causal_gp   :   2.33 [ 2.16,  2.75] cm/s (n=12)
     - acausal_gp  :   2.91 [ 2.27,  3.26] cm/s (n=12)
+    - dyn_gp      :   4.46 [ 3.57,  5.44] cm/s (n=12)
     - imu_dr      :   3.55 [ 2.58,  4.45] cm/s (n=12)
     - hybrid_v1   :   2.33 [ 2.15,  2.93] cm/s (n=12)
     - hybrid_v2   :   2.32 [ 2.09,  2.72] cm/s (n=12)
@@ -69,6 +75,7 @@
 - surge:
     - causal_gp   :   2.33 [ 2.03,  2.76] cm/s (n=31)
     - acausal_gp  :   2.91 [ 2.22,  3.36] cm/s (n=31)
+    - dyn_gp      :   4.19 [ 3.36,  5.11] cm/s (n=31)
     - imu_dr      :   3.14 [ 2.52,  4.00] cm/s (n=31)
     - hybrid_v1   :   2.34 [ 2.05,  2.94] cm/s (n=31)
     - hybrid_v2   :   2.32 [ 1.98,  2.74] cm/s (n=31)
@@ -76,6 +83,7 @@
 - sway:
     - causal_gp   :   2.29 [ 2.01,  2.87] cm/s (n=31)
     - acausal_gp  :   2.52 [ 2.13,  2.96] cm/s (n=31)
+    - dyn_gp      :   3.96 [ 2.96,  6.09] cm/s (n=31)
     - imu_dr      :   3.90 [ 3.03,  5.42] cm/s (n=31)
     - hybrid_v1   :   2.57 [ 2.17,  3.66] cm/s (n=31)
     - hybrid_v2   :   2.37 [ 2.02,  2.89] cm/s (n=31)
@@ -83,6 +91,7 @@
 - heave:
     - causal_gp   :   5.65 [ 4.20,  8.73] cm/s (n=31)
     - acausal_gp  :   5.61 [ 4.20,  8.59] cm/s (n=31)
+    - dyn_gp      :   6.06 [ 3.57,  8.18] cm/s (n=31)
     - imu_dr      :   6.72 [ 4.37, 10.60] cm/s (n=31)
     - hybrid_v1   :   5.45 [ 4.13,  8.61] cm/s (n=31)
     - hybrid_v2   :   5.65 [ 4.50,  9.00] cm/s (n=31)
@@ -131,17 +140,34 @@ Median dynamic-ness across 31 gaps: 0.0435 m/s^2 (split point for dynamic/calm h
 
 - causal_gp   :  99.8% (n=31)
 - acausal_gp  :  99.8% (n=31)
+- dyn_gp      :  96.2% (n=31)
 - imu_dr      : 100.0% (n=31)
 - hybrid_v1   :  99.6% (n=31)
 - hybrid_v2   :  99.8% (n=31)
 - zoh         :  98.6% (n=31)
 
-## 5. KF metrics (surge only, causal_gp/imu_dr/hybrid_v2/zoh)
+## 5. KF metrics (surge only)
 
 - causal_gp   : vRMSE   2.35 [ 2.10,  2.74] cm/s (n=31); honesty median 0.44x (n=31); peak drift median 0.159 m (n=31)
+- dyn_gp      : vRMSE   3.26 [ 2.75,  4.26] cm/s (n=31); honesty median 0.48x (n=31); peak drift median 0.352 m (n=31)
 - imu_dr      : vRMSE   2.68 [ 2.37,  3.26] cm/s (n=31); honesty median 0.42x (n=31); peak drift median 0.219 m (n=31)
 - hybrid_v2   : vRMSE   2.35 [ 2.09,  2.83] cm/s (n=31); honesty median 0.44x (n=31); peak drift median 0.161 m (n=31)
 - zoh         : vRMSE   2.81 [ 2.28,  3.27] cm/s (n=31); honesty median 0.49x (n=31); peak drift median 0.198 m (n=31)
+
+## 6b. Dynamics-GP claim -- control-conditioned dynamics GP vs causal GP and ZOH (surge)
+
+Trains a = f(v, u_thrust) on all pre-gap data (semi-parametric: ridge thrust-gain/damping mean + GP residual), rolls the gap forward with the commanded thrust.
+
+- all gaps (n=31):
+    - dyn-GP minus causal-GP RMSE: median 1.65 [0.45, 3.55] cm/s (dyn-GP wins 19% of gaps)
+    - dyn-GP minus ZOH RMSE: median 1.35 [0.12, 3.16] cm/s (dyn-GP wins 23% of gaps)
+- dynamic half (dynamic_ness >= median) (n=16):
+    - dyn-GP minus causal-GP RMSE: median 1.48 [0.22, 2.70] cm/s (dyn-GP wins 25% of gaps)
+    - dyn-GP minus ZOH RMSE: median 0.87 [0.01, 2.62] cm/s (dyn-GP wins 25% of gaps)
+- calm half (dynamic_ness < median) (n=15):
+    - dyn-GP minus causal-GP RMSE: median 2.35 [0.64, 4.16] cm/s (dyn-GP wins 13% of gaps)
+    - dyn-GP minus ZOH RMSE: median 2.29 [0.15, 3.25] cm/s (dyn-GP wins 20% of gaps)
+- linear-mean R^2 median per axis [surge, sway, heave]: [0.06, 0.039, 0.315]
 
 ## 6. IMU calibration diagnostics by bag group
 

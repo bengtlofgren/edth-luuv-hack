@@ -58,6 +58,32 @@ v2 matches the causal GP as best overall (vRMSE 2.35 cm/s, peak drift
 here (see the refuted IMU claim above), the hybrid's current value is graceful robustness, not a win over
 plain causal GP.
 
+## Control-conditioned dynamics GP (poc_07) — concept validated, blocked by actuation observability on these bags
+
+PILCO-style reformulation attacking the maneuver-overconfidence result at
+its root: regress acceleration on state and commanded thrust, a = f(v, u)
+(semi-parametric: ridge thrust-gain/damping mean + GP residual), and bridge
+an outage by rolling forward with the commands the vehicle still knows.
+On a synthetic control system this crushes ZOH by >2x with calibrated
+variance (tests/test_dynamics.py) — the machinery is correct.
+
+On the SOLAQUA ensemble it **loses**: median +1.65 cm/s vs the causal GP
+(wins 19% of gaps), also behind ZOH, though honest (96% 2-sigma coverage)
+and least-bad on the dynamic half (+1.48 cm/s, 25% wins). The diagnostic
+says why: the linear thrust->acceleration fit explains a median of only
+6% of surge acceleration variance (heave: 32%). On this tethered,
+net-following ROV, tether drag, currents and the net's wake dominate the
+DVL-observable acceleration; the commands barely do. Same observability
+wall as the IMU bridge, one level up: the *inputs* are known perfectly,
+but their effect on the vehicle is too weak to identify from these bags.
+
+Implication: control-conditioned bridging is the right structure (the
+maneuver becomes an observed input, uncertainty compounds through model
+ignorance instead of elapsed time), but it needs a vehicle whose commands
+actually explain its acceleration — an untethered AUV, or bags with
+authoritative maneuvers. Keep the supplier; gate it on the calibration
+R^2 the same way the IMU leg is gated on Procrustes scale.
+
 ## New finding — causal GP vs ZOH on Snapir
 
 Causal GP extrapolation barely beats zero-order hold on RMSE (median 0.239 vs
@@ -79,3 +105,9 @@ a strong cheap baseline (beats causal GP 68%).
 4. Hybrid v2 is the right fusion shape (gate + covariance intersection) and
    costs nothing when the IMU leg is useless; keep it as the integration
    point for a future, properly calibrated IMU.
+5. Every "smarter" bridge tried so far (IMU-DR, dynamics GP) fails on the
+   same axis: the extra information channel is not observable on this data
+   (frame scale, thrust authority). The general rule for gp_velocity: any
+   auxiliary leg needs an online observability check (Procrustes scale ~ 1,
+   dynamics R^2 above a floor) and must degrade to the causal GP when the
+   check fails.

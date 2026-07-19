@@ -229,6 +229,145 @@ def imu_bridge(calib, v0, t0, t_imu, f, w, t_end, var0=0.0):
     return t, mean, std
 
 
+# --- Control-conditioned dynamics-GP bridge ----------------------------------
+#
+# PILCO-style formulation (Deisenroth & Rasmussen): instead of regressing
+# velocity on time -- which leaves maneuvers structurally unobservable during
+# an outage and produced the maneuver-overconfidence result in RESULTS.md --
+# regress the *dynamics* on state and action: a = dv/dt ~ f(v, u), with u the
+# commanded thrust, which the vehicle still knows during a DVL outage. A
+# process that is nonstationary in time is close to stationary in (v, u).
+#
+# Semi-parametric: a ridge-fit linear model (thrust gains + linear damping)
+# is the mean function; a GP learns the residual. During the outage the model
+# is rolled forward from the last good fix with the *known* commanded thrust,
+# accumulating the GP's predictive variance step by step, so uncertainty
+# compounds through the model's actual ignorance rather than raw elapsed time.
+
+
+@dataclass
+class DynCalib:
+    """Per-axis semi-parametric dynamics model a_ax = W @ phi(v, u) + gp_ax(x).
+
+    phi(v, u) = [v (3), u (n_u), 1]; x = standardized [v, u] (constant
+    columns dropped via keep). gps operate on the residual after the linear
+    mean."""
+    W: np.ndarray            # (3, 3+n_u+1) linear mean coefficients
+    mu: np.ndarray           # (3+n_u,) feature standardization mean
+    sd: np.ndarray           # (3+n_u,) feature standardization scale
+    keep: np.ndarray         # (3+n_u,) bool, columns with non-degenerate variance
+    gps: list                # 3 fitted GaussianProcessRegressor (residual models)
+    sigma_r: np.ndarray      # (3,) total residual std after linear+GP [m/s^2]
+    lin_r2: np.ndarray       # (3,) R^2 of the linear mean alone (diagnostic)
+    band_s: float
+
+
+def _dyn_features(v, u):
+    return np.column_stack([v, u])
+
+
+def dynamics_calibrate(t_v, v, t_u, u, band_s=1.0, max_train=400, seed=0):
+    """Fit the semi-parametric dynamics model on healthy DVL + thrust data.
+
+    t_v, v: (n,), (n,3) DVL fix times [s] and body-frame velocity [m/s].
+    t_u, u: (p,), (p, n_u) commanded-thrust times and normalized commands
+        (data.py: (pwm-1500)/400). u is noiseless (it is the command we sent),
+        so unlike the IMU calibration there is no errors-in-variables
+        attenuation on the thrust-gain part of the map; only the damping
+        term regresses on (smoothed) noisy v.
+
+    Target: a = d(smoothed v)/dt on the DVL clock. Mean: ridge on
+    [v, u, 1]. GP: anisotropic Matern-2.5 + White on standardized [v, u]
+    residuals, subsampled to max_train points for tractability.
+    """
+    t_v = np.asarray(t_v, float); v = np.asarray(v, float)
+    t_u = np.asarray(t_u, float); u = np.asarray(u, float)
+    dt_v = float(np.median(np.diff(t_v)))
+    dt_u = float(np.median(np.diff(t_u)))
+
+    v_s = np.column_stack([_smooth(v[:, i], dt_v, band_s) for i in range(3)])
+    a = np.gradient(v_s, t_v, axis=0)
+    u_s = np.column_stack([np.interp(t_v, t_u, _smooth(u[:, i], dt_u, band_s))
+                            for i in range(u.shape[1])])
+
+    trim = slice(5, -5) if t_v.size > 12 else slice(None)
+    X = _dyn_features(v_s[trim], u_s[trim])
+    A = a[trim]
+
+    Phi = np.column_stack([X, np.ones(X.shape[0])])
+    ridge = Ridge(alpha=1.0, fit_intercept=False).fit(Phi, A)
+    W = ridge.coef_
+    resid_lin = A - Phi @ W.T
+    var_a = A.var(axis=0)
+    lin_r2 = 1.0 - resid_lin.var(axis=0) / np.where(var_a > 0, var_a, 1.0)
+
+    mu, sd = X.mean(axis=0), X.std(axis=0)
+    keep = sd > 1e-9
+    sd_safe = np.where(keep, sd, 1.0)
+    Xs = ((X - mu) / sd_safe)[:, keep]
+
+    if Xs.shape[0] > max_train:
+        idx = np.random.default_rng(seed).choice(Xs.shape[0], max_train, replace=False)
+        idx.sort()
+        Xs_fit, resid_fit = Xs[idx], resid_lin[idx]
+    else:
+        Xs_fit, resid_fit = Xs, resid_lin
+
+    d = Xs.shape[1]
+    gps, sigma_r = [], np.zeros(3)
+    for ax in range(3):
+        kernel = (ConstantKernel(1.0, (1e-3, 1e3))
+                  * Matern(length_scale=np.ones(d), length_scale_bounds=(0.1, 100.0),
+                            nu=2.5)
+                  + WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-8, 10.0)))
+        gp = GaussianProcessRegressor(kernel=kernel, normalize_y=True,
+                                       n_restarts_optimizer=1, random_state=seed)
+        gp.fit(Xs_fit, resid_fit[:, ax])
+        gps.append(gp)
+        sigma_r[ax] = (resid_fit[:, ax] - gp.predict(Xs_fit)).std()
+
+    return DynCalib(W=W, mu=mu, sd=sd_safe, keep=keep, gps=gps, sigma_r=sigma_r,
+                     lin_r2=np.asarray(lin_r2, float), band_s=float(band_s))
+
+
+def dynamics_bridge(dyncal, v0, t0, t_u, u, t_end, var0=0.0, h=0.1):
+    """Causal rollout of the dynamics model from (t0, v0) to t_end using the
+    commanded thrust stream (zero-order-held between commands).
+
+    Each step: a = W @ [v, u, 1] + gp(v, u);  v += h * a. Per-axis variance
+    accumulates the model's own predictive variance,
+        var += h^2 * (gp_std^2 + sigma_r^2),
+    i.e. uncertainty compounds through what the dynamics model does not know
+    at the states it actually visits -- not through raw time-distance as the
+    time-indexed GP's variance does. Input-uncertainty amplification through
+    the state feedback (full moment matching, as in PILCO) is deliberately
+    omitted; on these short gaps the first-order term dominates, and the
+    ensemble coverage numbers are the check on that approximation.
+
+    t_u, u: full thrust stream (only samples up to t_end used).
+    Returns t (k,) rollout times in (t0, t_end], mean (k,3), std (k,3).
+    """
+    t_u = np.asarray(t_u, float); u = np.asarray(u, float)
+    t = np.arange(t0 + h, t_end + h * 0.5, h)
+    v = np.array(v0, dtype=float).copy()
+    var = np.broadcast_to(np.asarray(var0, float), (3,)).copy()
+    mean = np.empty((t.size, 3)); std = np.empty((t.size, 3))
+    for k in range(t.size):
+        iu = np.searchsorted(t_u, t[k], side="right") - 1   # ZOH on commands
+        u_k = u[max(iu, 0)]
+        X = _dyn_features(v[None, :], u_k[None, :])
+        a = (np.column_stack([X, np.ones(1)]) @ dyncal.W.T)[0]
+        Xs = ((X - dyncal.mu) / dyncal.sd)[:, dyncal.keep]
+        for ax in range(3):
+            r, s = dyncal.gps[ax].predict(Xs, return_std=True)
+            a[ax] += r[0]
+            var[ax] += h ** 2 * (s[0] ** 2 + dyncal.sigma_r[ax] ** 2)
+        v = v + h * a
+        mean[k] = v
+        std[k] = np.sqrt(var)
+    return t, mean, std
+
+
 # --- Hybrid fusion -----------------------------------------------------------
 
 def hybrid_v1(gp_mean, gp_var, imu_mean, imu_var):
