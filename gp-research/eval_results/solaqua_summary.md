@@ -1,4 +1,4 @@
-# SOLAQUA sweep summary (Phase 2b)
+# SOLAQUA sweep summary
 
 ## Bags used / skipped
 
@@ -88,7 +88,7 @@
     - hybrid_v2   :   5.65 [ 4.50,  9.00] cm/s (n=31)
     - zoh         :   6.61 [ 4.55,  7.77] cm/s (n=31)
 
-## 2. C3 -- IMU-DR vs causal GP vs ZOH on dynamic vs calm gaps (surge)
+## 2. IMU-when-dynamic claim -- IMU-DR vs causal GP vs ZOH on dynamic vs calm gaps (surge)
 
 Median dynamic-ness across 31 gaps: 0.0435 m/s^2 (split point for dynamic/calm halves below)
 
@@ -109,7 +109,7 @@ Median dynamic-ness across 31 gaps: 0.0435 m/s^2 (split point for dynamic/calm h
 - n=31 gaps; ZOH-minus-IMU RMSE median -1.25 [-2.43, 0.12] cm/s
 - fraction of gaps where |ZOH - IMU| RMSE <= 1 cm/s: 35%
 
-## 3. C4 -- hybrid v2 vs best single supplier (regret), hybrid v1 vs v2
+## 3. Hybrid claim -- hybrid v2 vs best single supplier (regret), hybrid v1 vs v2
 
 - surge (n=31):
     - hybrid_v2 regret vs min(GP,IMU): median 0.00 [-0.02, 0.00] cm/s

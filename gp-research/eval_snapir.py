@@ -2,7 +2,8 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy", "scikit-learn", "matplotlib"]
 # ///
-"""Phase 2a: Snapir sweep -- re-tests POC 3 claims C1/C2 (gp-research/eval/PLAN.md).
+"""Snapir sweep -- re-tests poc_03_real_data.py's claims (adaptive-R drift
+benefit; maneuver overconfidence) per gp-research/eval/PLAN.md.
 
 Protocol (PLAN.md "Snapir" section): 2001 s @ 1 Hz, 3 axes, gap durations
 {10, 30, 60} s sliding every 30 s from t=180 to t=1900 (~57 starts x 3
@@ -335,7 +336,7 @@ for sup in BRIDGE_SUPPLIERS:
     row.append(f"{np.mean(vals_all):.3f}")
     emit("| " + " | ".join(row) + " |")
 
-emit("\n### Quiet vs dynamic split (median split on gap dynamic-ness score, C2)\n")
+emit("\n### Quiet vs dynamic split (median split on gap dynamic-ness score, maneuver-overconfidence claim)\n")
 emit("| supplier | quiet (n=" +
      str(len(set((r["gap_start"], r["gap_len"]) for r in sel(bridge_recs, axis="x") if not is_dynamic(r)))) +
      ") | dynamic (n=" +
@@ -377,8 +378,8 @@ for cfg in KF_CONFIGS:
     mqh, _, _ = med_iqr(quiet_h); mdh, _, _ = med_iqr(dyn_h)
     emit(f"| {cfg} | {mqd:.4f} | {mdd:.4f} | {mqh:.3f} | {mdh:.3f} |")
 
-# C1: paired per-gap drift deltas, causal_adaptive vs causal_naive (causal setting)
-emit("\n## Table 3c: C1 -- paired peak-drift deltas, causal_naive - causal_adaptive "
+# Adaptive-R drift claim: paired per-gap drift deltas, causal_adaptive vs causal_naive (causal setting)
+emit("\n## Table 3c: Adaptive-R drift claim -- paired peak-drift deltas, causal_naive - causal_adaptive "
      "(positive = adaptive wins) (m)\n")
 
 

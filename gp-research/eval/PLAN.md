@@ -60,11 +60,11 @@ headers on the two eval scripts. Tests: `uv run --with pytest,numpy,scikit-learn
 
 ## Success criteria / claims under test
 
-- C1: "adaptive R halves cruise drift" -> does adaptive R reduce median drift
+- "adaptive R halves cruise drift" -> does adaptive R reduce median drift
   across the gap ensemble vs naive fixed R? Causal setting.
-- C2: "GP+adaptive R overconfident in maneuvers" (the negative result) ->
+- "GP+adaptive R overconfident in maneuvers" (the negative result) ->
   coverage fraction by gap dynamic-ness quantile.
-- C3: "IMU wins when dynamic" -> does the rebuilt IMU bridge beat causal GP and
+- "IMU wins when dynamic" -> does the rebuilt IMU bridge beat causal GP and
   ZOH on dynamic gaps? Must also report IMU-vs-ZOH explicitly.
-- C4: "hybrid near-best both regimes" -> hybrid v2 vs best single supplier,
+- "hybrid near-best both regimes" -> hybrid v2 vs best single supplier,
   paired deltas; hybrid v1 sway-degradation case re-measured.

@@ -11,7 +11,7 @@ These sweeps supersede the single-gap numbers quoted in
 scripts are untouched historical artifacts; where a POC docstring and this
 file disagree, this file wins.
 
-## C1 — "adaptive R halves cruise drift": REFUTED as stated, revised
+## "Adaptive R halves cruise drift" — REFUTED as stated, revised
 
 Causal setting, paired per-gap peak-drift deltas (naive R minus adaptive R):
 overall median **+1.4 cm** with a 55% win rate — a marginal drift gain, not a
@@ -23,7 +23,7 @@ What adaptive R actually buys is **honesty**: median KF overclaim drops from
 Revised claim: *adaptive R roughly halves the filter's overconfidence during
 outages; its drift benefit is marginal.*
 
-## C2 — "GP + adaptive R overconfident in maneuvers": CONFIRMED
+## "GP + adaptive R overconfident in maneuvers" — CONFIRMED
 
 Causal-GP 2-sigma coverage: **0.949 on quiet gaps vs 0.766 on dynamic gaps**
 (median split on gap dynamic-ness; nominal 0.954). Downstream, even the
@@ -31,7 +31,7 @@ adaptive-R KF overclaims 2.32x on dynamic gaps (1.34x quiet). Adaptive R is
 the least-bad config but does not fix maneuver overconfidence — the GP cannot
 see accelerations that start inside the gap.
 
-## C3 — "IMU wins when dynamic": REFUTED
+## "IMU wins when dynamic" — REFUTED
 
 On the SOLAQUA ensemble the IMU dead-reckoning bridge loses to the causal GP
 **even on the dynamic half** of gaps: median +0.77 cm/s worse RMSE, winning
@@ -47,7 +47,7 @@ extra noise. The poc_06 single-gap "IMU wins the fast run" result does not
 survive the ensemble. A bag with genuinely aggressive maneuvers (or a factory
 frame calibration) could still rescue the concept; these bags cannot show it.
 
-## C4 — "hybrid near-best in both regimes": SURVIVES (v2)
+## "Hybrid near-best in both regimes" — SURVIVES (v2)
 
 Hybrid v2 (chi-square gate + covariance intersection) tracks the best single
 supplier with **~zero regret** on surge and sway (median 0.00 cm/s vs
@@ -55,7 +55,7 @@ min(GP, IMU); v1's regret 0.06–0.09 cm/s), with 99–100% bridge coverage.
 Caveat: on heave, v1 edges v2 (v2 regret 0.18 cm/s). Through the KF, hybrid
 v2 matches the causal GP as best overall (vRMSE 2.35 cm/s, peak drift
 0.16 m, honesty 0.44x — honest). Since the IMU bridge itself adds nothing
-here (C3), the hybrid's current value is graceful robustness, not a win over
+here (see the refuted IMU claim above), the hybrid's current value is graceful robustness, not a win over
 plain causal GP.
 
 ## New finding — causal GP vs ZOH on Snapir

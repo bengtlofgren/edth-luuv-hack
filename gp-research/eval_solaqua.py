@@ -2,7 +2,8 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy", "scikit-learn", "matplotlib", "rosbags"]
 # ///
-"""Phase 2b: SOLAQUA sweep -- re-tests poc_06_imu_bridge.py's claims (C3, C4)
+"""SOLAQUA sweep -- re-tests poc_06_imu_bridge.py's claims ("IMU wins when
+dynamic"; "hybrid near-best in both regimes")
 with the causal-by-construction, multi-gap-ensemble methodology of
 gp-research/eval/PLAN.md.
 
@@ -319,7 +320,7 @@ SUPPLIERS_ORDER = ["causal_gp", "acausal_gp", "imu_dr", "hybrid_v1", "hybrid_v2"
 
 def build_summary(records, bag_reports, load_failures):
     lines = []
-    lines.append("# SOLAQUA sweep summary (Phase 2b)\n")
+    lines.append("# SOLAQUA sweep summary\n")
 
     lines.append("## Bags used / skipped\n")
     for r in bag_reports:
@@ -356,7 +357,7 @@ def build_summary(records, bag_reports, load_failures):
             lines.append(f"    - {sup:12s}: {fmt_mi(vals)}")
     lines.append("")
 
-    lines.append("## 2. C3 -- IMU-DR vs causal GP vs ZOH on dynamic vs calm gaps (surge)\n")
+    lines.append("## 2. IMU-when-dynamic claim -- IMU-DR vs causal GP vs ZOH on dynamic vs calm gaps (surge)\n")
     surge_recs = filt(records, axis="surge")
     dyn_vals = sorted({(r["bag"], r["gap_start"], r["gap_len"]): r["dynamic_ness"]
                         for r in surge_recs}.values())
@@ -414,7 +415,7 @@ def build_summary(records, bag_reports, load_failures):
                  f"[{lo*100:.2f}, {hi*100:.2f}] cm/s")
     lines.append(f"- fraction of gaps where |ZOH - IMU| RMSE <= 1 cm/s: {within_1cm*100:.0f}%\n")
 
-    lines.append("## 3. C4 -- hybrid v2 vs best single supplier (regret), hybrid v1 vs v2\n")
+    lines.append("## 3. Hybrid claim -- hybrid v2 vs best single supplier (regret), hybrid v1 vs v2\n")
     for ax in AXIS_LABELS:
         ax_recs = filt(records, axis=ax)
         by_gap_ax = {}
@@ -550,7 +551,7 @@ def make_figure(records):
     ax.set_title("(c) IMU vs ZOH paired delta vs dynamic-ness")
     ax.grid(alpha=0.25, lw=0.5)
 
-    fig.suptitle("SOLAQUA sweep (Phase 2b): bridge RMSE, hybrid regret, IMU-vs-ZOH dynamics",
+    fig.suptitle("SOLAQUA sweep: bridge RMSE, hybrid regret, IMU-vs-ZOH dynamics",
                   fontsize=12)
     fig.tight_layout()
     fig.savefig(OUT_DIR / "solaqua_eval.png", dpi=120)

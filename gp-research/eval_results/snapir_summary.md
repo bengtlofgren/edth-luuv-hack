@@ -41,7 +41,7 @@ Median dynamic-ness score (quiet/dynamic split threshold): 0.0416775
 | zoh | 0.572 | 0.438 | 0.352 | 0.454 |
 | linear | 0.659 | 0.542 | 0.436 | 0.546 |
 
-### Quiet vs dynamic split (median split on gap dynamic-ness score, C2)
+### Quiet vs dynamic split (median split on gap dynamic-ness score, maneuver-overconfidence claim)
 
 | supplier | quiet (n=87) | dynamic (n=87) |
 |---|---|---|
@@ -68,7 +68,7 @@ Median dynamic-ness score (quiet/dynamic split threshold): 0.0416775
 | acausal_adaptive | 1.3611 | 3.6652 | 1.226 | 2.178 |
 | zoh_fixed | 2.1041 | 6.8006 | 1.809 | 3.305 |
 
-## Table 3c: C1 -- paired peak-drift deltas, causal_naive - causal_adaptive (positive = adaptive wins) (m)
+## Table 3c: Adaptive-R drift claim -- paired peak-drift deltas, causal_naive - causal_adaptive (positive = adaptive wins) (m)
 
 | split | 10s median delta | 30s median delta | 60s median delta | all median delta | all win rate (adaptive<naive) |
 |---|---|---|---|---|---|
