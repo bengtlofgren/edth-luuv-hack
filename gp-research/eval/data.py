@@ -1,8 +1,10 @@
-"""Data loaders: ANSFL Snapir DVL (V_test.npy) and SINTEF SOLAQUA rosbags.
+"""Data loaders: ANSFL Snapir DVL (V_test.npy), SINTEF SOLAQUA rosbags, and
+the DFKI Dagon AUV basin system-ID dataset.
 
-Both loaders prefer a local cache and fall back to downloading from the
+All loaders prefer a local cache and fall back to downloading from the
 public source. rosbags is only imported inside load_solaqua_bag, so this
-module can be imported (and load_snapir used) without it installed.
+module can be imported (and load_snapir / load_dagon used) without it
+installed.
 """
 from __future__ import annotations
 
@@ -42,6 +44,77 @@ def load_snapir(path=None, timeout=15):
     v = np.load(p)                       # (3, N)
     t = np.arange(v.shape[1], dtype=float)
     return dict(t=t, v=v)
+
+
+# --- Dagon (DFKI basin system-ID) -------------------------------------------
+
+DAGON_URL = "https://raw.githubusercontent.com/MichalTesnar/mystery/main/dagon_dataset.csv"
+DAGON_CANDIDATES = [
+    Path(__file__).resolve().parent.parent / "data" / "dagon_dataset.csv",
+    Path.home() / "dvl-gp" / "data" / "dagon_dataset.csv",
+]
+DAGON_DT_S = 0.25
+
+
+def load_dagon(path=None, timeout=15):
+    """Load the DFKI Dagon AUV saltwater-basin thruster system-ID dataset.
+
+    Source: github.com/MichalTesnar/mystery (dagon_dataset.csv, used by
+    arXiv:2504.04583). Columns u,v,r,th1,th2,th3,udot,vdot,rdot: body-frame
+    surge/sway velocity [m/s], yaw RATE [rad/s], 3 thruster commands [rps],
+    and the corresponding accelerations [m/s^2, m/s^2, rad/s^2]. The vehicle
+    (an untethered AUV, ~70 kg) was stabilized in pitch/depth and driven
+    freely in the horizontal plane by sinusoidal thruster commands with
+    periods randomly shifting in 20-70 s (Wehbe et al., ICRA 2019,
+    arXiv:1903.05355 -- this file is that paper's real-basin configuration 1,
+    the sample count 11567 matches exactly).
+
+    Sample rate: the CSV has NO time column and neither the mystery repo,
+    arXiv:2504.04583, nor arXiv:1903.05355 states the real-experiment rate
+    (the 1 Hz in the latter refers to their *simulation* dataset only). We
+    determined dt = 0.25 s (4 Hz) empirically from the data itself:
+      * matching numerical derivatives of u/v/r against the provided
+        udot/vdot/rdot: the residual minimum on the cleanest channel (r,
+        corr 0.97) sits at dt = 0.25 s, and cross-spectral |rdot/r|
+        magnitude gives dt = 0.23-0.26 s flat across frequency bands (a
+        low-pass-filtered xdot would skew high bands upward; it does not);
+      * decisively, the thruster commands' dominant spectral periods (86,
+        130, 172 samples, shared across all three thrusters) land inside
+        the documented 20-70 s sinusoid band only for dt ~= 0.25 s
+        (21.5/32.5/43 s); dt = 0.2 s or the ~0.173 s implied by the time
+        axis of arXiv:2504.04583's figures would put the strongest command
+        component below the documented 20 s minimum period.
+    Fig. 4/5 of arXiv:2504.04583 plot the dataset over 0-2000 s, implying
+    dt ~= 0.173 s, but that is inconsistent with the udot/vdot/rdot scaling
+    above and was likely an assumed plotting rate. Treat absolute times as
+    provenance-caveated; relative timing (what the sweep uses) is what the
+    derivative check pins down.
+
+    Caveats for downstream use: velocities are the vehicle's navigation
+    estimates (DVL for u/v, fiber-optic gyro for r), NOT raw DVL
+    bottom-track pings; axis 2 is a yaw RATE in rad/s, not a linear
+    velocity -- never pool it with u/v in any aggregate.
+
+    Returns dict(t=(n,) seconds at DAGON_DT_S spacing, v=(n,3) [u, v, r],
+    a=(n,3) [udot, vdot, rdot], u_cmd=(n,3) thruster commands [rps]).
+    """
+    if path is not None:
+        p = Path(path)
+    else:
+        p = next((c for c in DAGON_CANDIDATES if c.exists()), None)
+        if p is None:
+            p = DAGON_CANDIDATES[0]
+            p.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(DAGON_URL, p)
+    d = np.genfromtxt(p, delimiter=",", names=True)
+    expected = ("u", "v", "r", "th1", "th2", "th3", "udot", "vdot", "rdot")
+    if d.dtype.names != expected:
+        raise ValueError(f"unexpected Dagon columns {d.dtype.names!r}")
+    v = np.column_stack([d["u"], d["v"], d["r"]])
+    a = np.column_stack([d["udot"], d["vdot"], d["rdot"]])
+    u_cmd = np.column_stack([d["th1"], d["th2"], d["th3"]])
+    t = np.arange(v.shape[0], dtype=float) * DAGON_DT_S
+    return dict(t=t, v=v, a=a, u_cmd=u_cmd)
 
 
 # --- SOLAQUA (SINTEF Ocean) -------------------------------------------------

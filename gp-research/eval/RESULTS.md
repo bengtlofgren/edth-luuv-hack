@@ -111,3 +111,58 @@ a strong cheap baseline (beats causal GP 68%).
    auxiliary leg needs an online observability check (Procrustes scale ~ 1,
    dynamics R^2 above a floor) and must degrade to the causal GP when the
    check fails.
+
+## Dagon basin data — does the dynamics GP win when thrust explains motion?
+
+The SOLAQUA verdict left the dynamics GP with an untested alibi: it lost
+because commanded thrust explained only ~6% of that tethered ROV's surge
+acceleration, not because the supplier is wrong. The DFKI Dagon dataset
+(eval_dagon.py; loader provenance and the empirical 4 Hz sample-rate
+determination in eval/data.py::load_dagon) is the other side of the natural
+experiment: an untethered AUV in a saltwater basin, driven in the horizontal
+plane by sinusoidal thruster system-ID excitation — a vehicle whose commands
+should genuinely explain its motion. 92 sliding gaps (46 x 10 s + 46 x 20 s
+over the 2892 s record); suppliers: causal time-GP (trailing 60 s window),
+dyn_gp (trained causally on all pre-gap data, rolled forward with the
+commanded thrust), ZOH. Axes surge/sway [m/s] and yaw rate [rad/s], never
+pooled.
+
+The alibi holds and the supplier delivers. The observability diagnostic
+flips exactly as predicted: the ridge thrust-gain/damping mean alone
+explains a median 49% of surge acceleration (SOLAQUA: 6%), 26% of sway, 67%
+of yaw — and with that observability the dynamics GP **wins every axis,
+decisively**. Median bridge RMSE (20 s gaps): surge 4.0 cm/s vs 15.0 (time-GP)
+and 20.7 (ZOH); sway 3.4 vs 7.1 and 9.4 cm/s; yaw rate 62 vs 297 and
+359 mrad/s. Paired per gap it beats the time-GP on 86% (surge), 85% (sway),
+90% (yaw) of gaps and ZOH on 85-90%, with the margin largest on the dynamic
+half (surge: median -22.2 cm/s vs ZOH, 98% wins) but still overwhelming on
+the calm half (78-89% wins) — through command-driven maneuvers there is no
+regime where the time-GP is preferable here. The failure mode RESULTS.md
+opened with — maneuvers structurally unobservable during an outage — is
+gone: the maneuver arrives as an observed input (see the example gap in
+eval_results/dagon_eval.png, where dyn_gp tracks a full sinusoidal reversal
+mid-gap that the time-GP flattens through).
+
+The semi-parametric split also pulls its weight: at the true hidden in-gap
+states, adding the GP residual to the ridge mean cuts one-step acceleration
+residual RMS roughly in half on every axis (median ratio 0.45 surge, 0.46
+sway, 0.50 yaw) — the GP is learning real unmodeled dynamics (quadratic
+drag, thruster asymmetries), not noise, even where the linear model is
+already good. Uncertainty is the one soft spot: dyn_gp's 2-sigma bridge
+coverage is 80/76/86% per axis against the time-GP's 93/93/87% — the
+first-order variance rollout (no input-uncertainty propagation through the
+state feedback) is mildly overconfident once its mean is this accurate;
+acceptable, but short of the nominal 95%.
+
+Verdict: the SOLAQUA loss was an observability failure of that platform, not
+of the method — on a vehicle where commands explain motion, the
+control-conditioned dynamics GP is the best bridge supplier tested in this
+whole evaluation, and the R^2 gate proposed in the SOLAQUA section is
+confirmed as the right deployment switch (R^2 ~ 0.5 here vs 0.06 there
+cleanly separates the win from the loss). Caveats: this is a basin, not
+open water (no currents or waves — the disturbance term that sank SOLAQUA
+is absent by construction, so this is the method's best case); 3-DOF
+horizontal motion only (yaw axis is a rate, heave untested); velocities are
+the vehicle's navigation estimates (DVL + fiber-optic gyro), not raw DVL
+bottom-track; and the 4 Hz sample rate is empirically determined (three
+independent checks in the loader docstring), not stated by the source.
