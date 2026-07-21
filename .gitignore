@@ -73,3 +73,6 @@ dist/
 
 # Node (likewise)
 node_modules/
+
+# Downloaded datasets (auto-fetched by gp-research/eval/data.py)
+gp-research/data/
